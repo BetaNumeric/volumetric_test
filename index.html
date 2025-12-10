@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.3_SliceView_CanvasRender</title>
+    <title>v0.4_SliceView_SmartSeek</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -57,13 +57,13 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, FileVideo, Clock } from 'lucide-react';
+        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play } from 'lucide-react';
 
         const App = () => {
             // --- State ---
             const [images, setImages] = useState([]);
             const [videoSrc, setVideoSrc] = useState(null);
-            const [videoMeta, setVideoMeta] = useState({ name: '', duration: 0, loaded: false });
+            const [videoMeta, setVideoMeta] = useState({ name: '', duration: 0, loaded: false, readyToPlay: false });
             const [sliceIndex, setSliceIndex] = useState(0); // 0.0 to 1.0 (float)
             const [mode, setMode] = useState('tilt'); // 'tilt' or 'motion'
             const [status, setStatus] = useState('Waiting for input...');
@@ -113,9 +113,41 @@
                 }
             };
 
-            // --- Video & Canvas Logic ---
+            // --- Video Logic ---
 
-            // This effect runs a tight loop to paint the video frame to the canvas
+            // This function "unlocks" the video on mobile by playing it briefly
+            const initializeVideo = () => {
+                if (videoRef.current) {
+                    videoRef.current.play().then(() => {
+                        videoRef.current.pause();
+                        setVideoMeta(prev => ({ ...prev, readyToPlay: true }));
+                    }).catch(e => {
+                        console.error("Video Init Failed", e);
+                        setErrorMessage("Could not initialize video. Try tapping again.");
+                    });
+                }
+            };
+
+            const updateVideoPosition = (normalizedPosition) => {
+                if (videoRef.current && videoMeta.loaded && videoMeta.readyToPlay && videoMeta.duration > 0) {
+                     const targetTime = normalizedPosition * videoMeta.duration;
+                     
+                     if (isFinite(targetTime)) {
+                        const video = videoRef.current;
+                        
+                        // SMART SEEKING:
+                        // 1. Don't seek if we are already seeking (prevents black screen freeze)
+                        // 2. Only seek if the difference is significant (prevents micro-stutter)
+                        if (!video.seeking) {
+                             if (Math.abs(video.currentTime - targetTime) > 0.05) { 
+                                 video.currentTime = targetTime;
+                             }
+                        }
+                     }
+                }
+            };
+
+            // Render loop to paint video to canvas
             useEffect(() => {
                 let animationFrameId;
                 
@@ -125,15 +157,12 @@
                         const canvas = canvasRef.current;
                         const ctx = canvas.getContext('2d');
                         
-                        // Check if video has data to render
+                        // If video is ready (HAVE_CURRENT_DATA or greater)
                         if (video.readyState >= 2) { 
-                            // 2 = HAVE_CURRENT_DATA
-                            // Sync canvas size to video size (once or on resize)
                             if (canvas.width !== video.videoWidth && video.videoWidth > 0) {
                                 canvas.width = video.videoWidth;
                                 canvas.height = video.videoHeight;
                             }
-                            
                             if (canvas.width > 0 && canvas.height > 0) {
                                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                             }
@@ -142,7 +171,6 @@
                     animationFrameId = requestAnimationFrame(renderLoop);
                 };
                 
-                // Start the loop if video is active
                 if (videoSrc) {
                     renderLoop();
                 }
@@ -150,17 +178,6 @@
                 return () => cancelAnimationFrame(animationFrameId);
             }, [videoSrc, videoMeta.loaded]);
 
-
-            const updateVideoPosition = (normalizedPosition) => {
-                if (videoRef.current && videoMeta.loaded && videoMeta.duration > 0) {
-                     const time = normalizedPosition * videoMeta.duration;
-                     if (isFinite(time)) {
-                        // We use direct currentTime assignment for frame-by-frame scrubbing.
-                        // We avoid fastSeek() because it snaps to keyframes (often causing black screens if keyframes are sparse).
-                        videoRef.current.currentTime = time;
-                     }
-                }
-            };
 
             // --- Sensor Logic ---
 
@@ -220,7 +237,7 @@
                     window.removeEventListener('deviceorientation', handleOrientation);
                     window.removeEventListener('devicemotion', handleMotion);
                 };
-            }, [permissionGranted, mode, images.length, videoSrc, videoMeta.loaded]);
+            }, [permissionGranted, mode, images.length, videoSrc, videoMeta.loaded, videoMeta.readyToPlay]);
 
             // --- File Handling ---
             
@@ -234,7 +251,7 @@
                     const url = URL.createObjectURL(file);
                     setVideoSrc(url);
                     setImages([]);
-                    setVideoMeta({ name: file.name, duration: 0, loaded: false });
+                    setVideoMeta({ name: file.name, duration: 0, loaded: false, readyToPlay: false });
                     setStatus(`Loading Video: ${file.name}...`);
                 } else {
                     files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
@@ -251,7 +268,7 @@
             const loadSampleVideo = () => {
                 setVideoSrc('./video/scan.mp4');
                 setImages([]);
-                setVideoMeta({ name: 'Sample Scan (scan.mp4)', duration: 0, loaded: false });
+                setVideoMeta({ name: 'Sample Scan (scan.mp4)', duration: 0, loaded: false, readyToPlay: false });
                 setStatus('Loading Sample Video...');
                 setSliceIndex(0);
                 positionRef.current = 0;
@@ -264,9 +281,7 @@
                         duration: videoRef.current.duration,
                         loaded: true
                     }));
-                    setStatus('Video Ready');
-                    // Important: Ensure video is paused so it doesn't fight our scrubbing
-                    videoRef.current.pause();
+                    setStatus('Video Ready - Tap to Start');
                 }
             };
 
@@ -275,12 +290,12 @@
                 // 1. Video Mode
                 if (videoSrc) {
                     return (
-                        <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
+                        <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden group">
                             {/* Hidden Video Source */}
                             <video 
                                 ref={videoRef}
                                 src={videoSrc}
-                                className="absolute opacity-0 w-px h-px pointer-events-none" // Hidden but present
+                                className="absolute opacity-0 w-px h-px pointer-events-none" 
                                 playsInline
                                 webkit-playsinline="true"
                                 muted
@@ -294,8 +309,21 @@
                                 className="max-w-full max-h-full object-contain pointer-events-none"
                             />
 
-                            {/* Detailed Info Overlay for Video */}
-                            <div className="absolute top-4 left-4 flex flex-col gap-1 text-green-500 font-mono text-xs bg-black/70 p-2 rounded border border-green-900/30">
+                            {/* Initialization Overlay (Required for Mobile) */}
+                            {!videoMeta.readyToPlay && (
+                                <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-20">
+                                    <button 
+                                        onClick={initializeVideo}
+                                        className="bg-green-600 hover:bg-green-500 text-white rounded-full p-6 shadow-lg transform transition-transform active:scale-95 animate-pulse"
+                                    >
+                                        <Play className="w-12 h-12 fill-current" />
+                                    </button>
+                                    <p className="mt-4 text-green-400 font-mono">Tap to Initialize Video Decoder</p>
+                                </div>
+                            )}
+
+                            {/* Detailed Info Overlay */}
+                            <div className="absolute top-4 left-4 flex flex-col gap-1 text-green-500 font-mono text-xs bg-black/70 p-2 rounded border border-green-900/30 pointer-events-none">
                                 <div className="font-bold text-green-400">{videoMeta.name || "Loading..."}</div>
                                 <div className="flex items-center gap-2">
                                     <Clock className="w-3 h-3" />
