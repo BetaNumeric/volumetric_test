@@ -1,266 +1,299 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Smartphone, Move, Rotate3D, Layers, Info } from 'lucide-react';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CT Slice Viewer</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
+    
+    <!-- iOS Meta Tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0f172a">
 
-const App = () => {
-  // --- State ---
-  const [images, setImages] = useState([]);
-  const [sliceIndex, setSliceIndex] = useState(0);
-  const [mode, setMode] = useState('tilt'); // 'tilt' or 'motion'
-  const [status, setStatus] = useState('Waiting for input...');
-  const [permissionGranted, setPermissionGranted] = useState(false);
-  const [debugInfo, setDebugInfo] = useState({ z: 0, v: 0 });
-  
-  // Refs for physics loop
-  const positionRef = useRef(50); // Start in middle (0-100)
-  const velocityRef = useRef(0);
-  const lastTimeRef = useRef(Date.now());
-  const animationFrameRef = useRef(null);
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
 
-  // --- Helpers ---
-
-  // Request Permission (Crucial for iOS 13+)
-  const requestAccess = async () => {
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      try {
-        const response = await DeviceMotionEvent.requestPermission();
-        if (response === 'granted') {
-          setPermissionGranted(true);
-          setStatus('Sensors Active');
-        } else {
-          setStatus('Permission Denied');
+    <!-- React & ReactDOM (ES Modules) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.292.0"
         }
-      } catch (e) {
-        console.error(e);
-        setStatus('Error requesting permission');
-      }
-    } else {
-      // Non-iOS 13+ devices (Android, older iOS) usually don't need explicit permission
-      setPermissionGranted(true);
-      setStatus('Sensors Active');
     }
-  };
-
-  // --- Sensor Logic ---
-
-  // 1. Tilt Listener (DeviceOrientation)
-  const handleOrientation = (event) => {
-    if (mode !== 'tilt') return;
+    </script>
     
-    // Beta is the front-to-back tilt (-180 to 180)
-    // We map a comfortable range (e.g., 0 to 60 degrees) to slices
-    let tilt = event.beta || 0;
+    <!-- Babel for JSX compilation in browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        /* Prevent bounce scrolling on iOS */
+        body {
+            overscroll-behavior-y: none;
+            touch-action: pan-x pan-y;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen w-screen overflow-hidden">
     
-    // Clamp tilt to a usable viewing angle
-    // -10 (leaning back) to 70 (leaning forward)
-    const minTilt = -10;
-    const maxTilt = 70;
-    
-    let normalized = (tilt - minTilt) / (maxTilt - minTilt);
-    normalized = Math.max(0, Math.min(1, normalized)); // Clamp 0-1
+    <div id="root"></div>
 
-    const totalSlices = images.length > 0 ? images.length : 100;
-    const newIndex = Math.floor(normalized * (totalSlices - 1));
-    setSliceIndex(newIndex);
-    setDebugInfo({ z: tilt.toFixed(1), v: 0 });
-  };
+    <!-- PWA Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./service-worker.js')
+                    .then(reg => console.log('SW Registered'))
+                    .catch(err => console.log('SW Fail', err));
+            });
+        }
+    </script>
 
-  // 2. Motion/Physics Loop (DeviceMotion)
-  const handleMotion = (event) => {
-    if (mode !== 'motion') return;
+    <!-- Main Application Script -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle } from 'lucide-react';
 
-    // Linear acceleration (removing gravity)
-    const accZ = event.acceleration.z || 0; 
-    
-    // Physics update in animation loop would be smoother, but event-driven is okay for simple logic
-    // We use a simplified physics model here to prevent infinite drift
-    const now = Date.now();
-    const dt = (now - lastTimeRef.current) / 1000;
-    lastTimeRef.current = now;
+        const App = () => {
+            // --- State ---
+            const [images, setImages] = useState([]);
+            const [sliceIndex, setSliceIndex] = useState(0);
+            const [mode, setMode] = useState('tilt'); // 'tilt' or 'motion'
+            const [status, setStatus] = useState('Waiting for input...');
+            const [permissionGranted, setPermissionGranted] = useState(false);
+            const [errorMessage, setErrorMessage] = useState('');
+            const [debugInfo, setDebugInfo] = useState({ z: 0, v: 0 });
+            
+            // Refs for physics loop
+            const positionRef = useRef(50); // Start in middle (0-100)
+            const velocityRef = useRef(0);
+            const lastTimeRef = useRef(Date.now());
 
-    // Deadzone to ignore small jitters
-    const cleanAcc = Math.abs(accZ) < 0.2 ? 0 : accZ;
+            // --- Helpers ---
 
-    // Update Velocity
-    // We reverse sign because moving phone "forward" (away) usually reads as negative Z depending on implementation,
-    // but we want "Forward" to go deeper into the stack.
-    velocityRef.current += (cleanAcc * dt * 50); 
+            const requestAccess = async () => {
+                setErrorMessage('');
+                
+                // HTTPS Check
+                if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+                    setErrorMessage("iOS requires HTTPS for sensors. App may not work.");
+                }
 
-    // Apply Friction (Damping) - CRITICAL for usability
-    // Without this, the slice will drift forever after one movement
-    velocityRef.current *= 0.90; 
+                // iOS Permission
+                if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    try {
+                        const response = await DeviceOrientationEvent.requestPermission();
+                        if (response === 'granted') {
+                            if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                                try { await DeviceMotionEvent.requestPermission(); } catch (e) {}
+                            }
+                            setPermissionGranted(true);
+                            setStatus('Sensors Active');
+                        } else {
+                            setStatus('Permission Denied');
+                            setErrorMessage("Permission denied. Reset Safari permissions to try again.");
+                        }
+                    } catch (e) {
+                        console.error(e);
+                        setStatus('Error requesting permission');
+                        setErrorMessage(e.message || "Unknown error.");
+                    }
+                } else {
+                    setPermissionGranted(true);
+                    setStatus('Sensors Active');
+                }
+            };
 
-    // Update Position
-    positionRef.current += velocityRef.current;
+            // --- Sensor Logic ---
 
-    // Bounce off boundaries (0 to 100)
-    if (positionRef.current < 0) {
-      positionRef.current = 0;
-      velocityRef.current = 0;
-    }
-    const maxPos = images.length > 0 ? images.length - 1 : 100;
-    if (positionRef.current > maxPos) {
-      positionRef.current = maxPos;
-      velocityRef.current = 0;
-    }
+            const handleOrientation = (event) => {
+                if (mode !== 'tilt') return;
+                
+                let tilt = event.beta || 0;
+                const minTilt = -10;
+                const maxTilt = 70;
+                
+                let normalized = (tilt - minTilt) / (maxTilt - minTilt);
+                normalized = Math.max(0, Math.min(1, normalized));
 
-    setSliceIndex(Math.floor(positionRef.current));
-    setDebugInfo({ z: cleanAcc.toFixed(2), v: velocityRef.current.toFixed(2) });
-  };
+                const totalSlices = images.length > 0 ? images.length : 100;
+                const newIndex = Math.floor(normalized * (totalSlices - 1));
+                setSliceIndex(newIndex);
+                setDebugInfo({ z: tilt.toFixed(1), v: 0 });
+            };
 
-  useEffect(() => {
-    if (permissionGranted) {
-      window.addEventListener('deviceorientation', handleOrientation);
-      window.addEventListener('devicemotion', handleMotion);
-    }
-    return () => {
-      window.removeEventListener('deviceorientation', handleOrientation);
-      window.removeEventListener('devicemotion', handleMotion);
-    };
-  }, [permissionGranted, mode, images.length]);
+            const handleMotion = (event) => {
+                if (mode !== 'motion') return;
 
-  // --- File Handling ---
-  const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length === 0) return;
+                const accZ = event.acceleration.z || 0; 
+                const now = Date.now();
+                const dt = (now - lastTimeRef.current) / 1000;
+                lastTimeRef.current = now;
 
-    // Sort files by name to ensure sequence (image1.jpg, image2.jpg)
-    files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+                const cleanAcc = Math.abs(accZ) < 0.2 ? 0 : accZ;
 
-    const imageUrls = files.map(file => URL.createObjectURL(file));
-    setImages(imageUrls);
-    setSliceIndex(0);
-    positionRef.current = 0;
-    setStatus(`Loaded ${files.length} images`);
-  };
+                velocityRef.current += (cleanAcc * dt * 50); 
+                velocityRef.current *= 0.90; 
 
-  // --- Rendering ---
-  
-  // Render the current view (Image, Generated Sphere, or Number)
-  const renderContent = () => {
-    // 1. Image Mode
-    if (images.length > 0) {
-      return (
-        <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
-          <img 
-            src={images[sliceIndex]} 
-            alt={`Slice ${sliceIndex}`}
-            className="max-w-full max-h-full object-contain pointer-events-none select-none"
-          />
-          <div className="absolute top-4 left-4 text-green-500 font-mono text-xs bg-black/50 p-1">
-            IMG: {images[sliceIndex].split('/').pop()}
-          </div>
-        </div>
-      );
-    }
+                positionRef.current += velocityRef.current;
 
-    // 2. Demo Mode (Procedural Sphere)
-    // We simulate a sphere by drawing a circle that gets bigger then smaller
-    const totalDemoSlices = 100;
-    const center = totalDemoSlices / 2;
-    const radius = Math.sqrt(Math.pow(center, 2) - Math.pow(sliceIndex - center, 2));
-    const safeRadius = isNaN(radius) ? 0 : radius;
-    const scale = safeRadius / center; // 0 to 1
+                if (positionRef.current < 0) {
+                    positionRef.current = 0;
+                    velocityRef.current = 0;
+                }
+                const maxPos = images.length > 0 ? images.length - 1 : 100;
+                if (positionRef.current > maxPos) {
+                    positionRef.current = maxPos;
+                    velocityRef.current = 0;
+                }
 
-    return (
-      <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-white">
-        <div 
-          className="rounded-full bg-red-500/80 shadow-[0_0_50px_rgba(239,68,68,0.5)] transition-all duration-75 ease-linear"
-          style={{
-            width: `${300 * scale}px`,
-            height: `${300 * scale}px`,
-            opacity: scale > 0 ? 1 : 0
-          }}
-        />
-        <div className="mt-8 font-mono text-4xl text-slate-500 select-none">
-          SLICE {sliceIndex}
-        </div>
-        <p className="text-slate-600 text-sm mt-2">
-          (No images loaded. Generating demo object)
-        </p>
-      </div>
-    );
-  };
+                setSliceIndex(Math.floor(positionRef.current));
+                setDebugInfo({ z: cleanAcc.toFixed(2), v: velocityRef.current.toFixed(2) });
+            };
 
-  return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
-      
-      {/* Header / Controls */}
-      <div className="flex-none bg-slate-900 border-b border-slate-800 p-4 flex items-center justify-between z-10">
-        <div className="flex items-center gap-2">
-          <Layers className="text-blue-400 w-5 h-5" />
-          <h1 className="font-bold hidden sm:block">SliceViewer</h1>
-        </div>
+            useEffect(() => {
+                if (permissionGranted) {
+                    window.addEventListener('deviceorientation', handleOrientation);
+                    window.addEventListener('devicemotion', handleMotion);
+                }
+                return () => {
+                    window.removeEventListener('deviceorientation', handleOrientation);
+                    window.removeEventListener('devicemotion', handleMotion);
+                };
+            }, [permissionGranted, mode, images.length]);
 
-        <div className="flex items-center gap-2 bg-slate-800 rounded-lg p-1">
-          <button 
-            onClick={() => setMode('tilt')}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${mode === 'tilt' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-          >
-            <Rotate3D className="w-4 h-4" /> Tilt
-          </button>
-          <button 
-            onClick={() => setMode('motion')}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${mode === 'motion' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-          >
-            <Move className="w-4 h-4" /> Motion
-          </button>
-        </div>
+            // --- File Handling ---
+            const handleFileUpload = (e) => {
+                const files = Array.from(e.target.files);
+                if (files.length === 0) return;
+                files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+                const imageUrls = files.map(file => URL.createObjectURL(file));
+                setImages(imageUrls);
+                setSliceIndex(0);
+                positionRef.current = 0;
+                setStatus(`Loaded ${files.length} images`);
+            };
 
-        <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-lg transition-colors">
-          <input 
-            type="file" 
-            multiple 
-            accept="image/*" 
-            className="hidden" 
-            onChange={handleFileUpload}
-          />
-          <Upload className="w-5 h-5" />
-        </label>
-      </div>
+            // --- Render Content ---
+            const renderContent = () => {
+                if (images.length > 0) {
+                    return (
+                        <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
+                            <img 
+                                src={images[sliceIndex]} 
+                                alt={`Slice ${sliceIndex}`}
+                                className="max-w-full max-h-full object-contain pointer-events-none select-none"
+                            />
+                            <div className="absolute top-4 left-4 text-green-500 font-mono text-xs bg-black/50 p-1">
+                                IMG: {images[sliceIndex].split('/').pop()}
+                            </div>
+                        </div>
+                    );
+                }
 
-      {/* Main Viewport */}
-      <div className="flex-1 relative overflow-hidden">
-        
-        {/* Permission Overlay */}
-        {!permissionGranted && (
-          <div className="absolute inset-0 z-50 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center">
-            <Smartphone className="w-16 h-16 text-blue-500 mb-4 animate-pulse" />
-            <h2 className="text-2xl font-bold mb-2">Sensor Access Needed</h2>
-            <p className="text-slate-400 mb-6 max-w-xs">
-              To track your phone's position and tilt, we need access to the accelerometer and gyroscope.
-            </p>
-            <button 
-              onClick={requestAccess}
-              className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform active:scale-95"
-            >
-              Enable Sensors
-            </button>
-          </div>
-        )}
+                const totalDemoSlices = 100;
+                const center = totalDemoSlices / 2;
+                const radius = Math.sqrt(Math.pow(center, 2) - Math.pow(sliceIndex - center, 2));
+                const safeRadius = isNaN(radius) ? 0 : radius;
+                const scale = safeRadius / center;
 
-        {renderContent()}
+                return (
+                    <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-white">
+                        <div 
+                            className="rounded-full bg-red-500/80 shadow-[0_0_50px_rgba(239,68,68,0.5)] transition-all duration-75 ease-linear"
+                            style={{
+                                width: `${300 * scale}px`,
+                                height: `${300 * scale}px`,
+                                opacity: scale > 0 ? 1 : 0
+                            }}
+                        />
+                        <div className="mt-8 font-mono text-4xl text-slate-500 select-none">
+                            SLICE {sliceIndex}
+                        </div>
+                        <p className="text-slate-600 text-sm mt-2">
+                            (No images loaded. Generating demo object)
+                        </p>
+                    </div>
+                );
+            };
 
-        {/* Overlay Info */}
-        <div className="absolute bottom-6 left-0 right-0 flex justify-center pointer-events-none">
-          <div className="bg-slate-900/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700 text-xs font-mono text-slate-300 flex gap-4">
-            <span>MODE: {mode.toUpperCase()}</span>
-            <span>IDX: {sliceIndex}</span>
-            <span className="text-slate-500">
-              {mode === 'tilt' ? `TILT: ${debugInfo.z}°` : `ACC: ${debugInfo.z}`}
-            </span>
-          </div>
-        </div>
-      </div>
+            return (
+                <div className="flex flex-col h-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
+                    {/* Header */}
+                    <div className="flex-none bg-slate-900 border-b border-slate-800 p-4 flex items-center justify-between z-10">
+                        <div className="flex items-center gap-2">
+                            <Layers className="text-blue-400 w-5 h-5" />
+                            <h1 className="font-bold hidden sm:block">SliceViewer</h1>
+                        </div>
 
-      {/* Helper Tip */}
-      <div className="flex-none bg-slate-900 p-2 text-center text-xs text-slate-500">
-        {mode === 'tilt' 
-          ? "Tip: Tilt your phone forward and back like looking through a window." 
-          : "Tip: Push phone forward/back physically. Reset if it drifts."}
-      </div>
+                        <div className="flex items-center gap-2 bg-slate-800 rounded-lg p-1">
+                            <button 
+                                onClick={() => setMode('tilt')}
+                                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${mode === 'tilt' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                            >
+                                <Rotate3D className="w-4 h-4" /> Tilt
+                            </button>
+                            <button 
+                                onClick={() => setMode('motion')}
+                                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${mode === 'motion' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                            >
+                                <Move className="w-4 h-4" /> Motion
+                            </button>
+                        </div>
 
-    </div>
-  );
-};
+                        <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-lg transition-colors">
+                            <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileUpload} />
+                            <Upload className="w-5 h-5" />
+                        </label>
+                    </div>
 
-export default App;
+                    {/* Main Viewport */}
+                    <div className="flex-1 relative overflow-hidden">
+                        {!permissionGranted && (
+                            <div className="absolute inset-0 z-50 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center">
+                                <Smartphone className="w-16 h-16 text-blue-500 mb-4 animate-pulse" />
+                                <h2 className="text-2xl font-bold mb-2">Sensor Access Needed</h2>
+                                {errorMessage ? (
+                                   <div className="bg-red-500/20 border border-red-500 p-4 rounded-lg mb-4 text-red-200 text-sm max-w-xs flex flex-col items-center gap-2">
+                                     <AlertTriangle className="w-6 h-6" />
+                                     <p>{errorMessage}</p>
+                                   </div>
+                                ) : (
+                                  <p className="text-slate-400 mb-6 max-w-xs">
+                                    To track position, we need sensor access.
+                                  </p>
+                                )}
+                                <button onClick={requestAccess} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-full shadow-lg active:scale-95">
+                                  Enable Sensors
+                                </button>
+                            </div>
+                        )}
+
+                        {renderContent()}
+
+                        <div className="absolute bottom-6 left-0 right-0 flex justify-center pointer-events-none">
+                            <div className="bg-slate-900/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700 text-xs font-mono text-slate-300 flex gap-4">
+                                <span>MODE: {mode.toUpperCase()}</span>
+                                <span>IDX: {sliceIndex}</span>
+                                <span className="text-slate-500">{mode === 'tilt' ? `TILT: ${debugInfo.z}°` : `ACC: ${debugInfo.z}`}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex-none bg-slate-900 p-2 text-center text-xs text-slate-500">
+                        {mode === 'tilt' ? "Tip: Tilt phone forward/back." : "Tip: Push/Pull phone physically."}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
