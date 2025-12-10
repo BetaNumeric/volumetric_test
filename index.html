@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.2_SliceView_VideoFix</title>
+    <title>v0.3_SliceView_CanvasRender</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -76,6 +76,7 @@
             const velocityRef = useRef(0);
             const lastTimeRef = useRef(Date.now());
             const videoRef = useRef(null);
+            const canvasRef = useRef(null);
 
             // --- Helpers ---
 
@@ -112,22 +113,56 @@
                 }
             };
 
-            // --- Sensor Logic ---
+            // --- Video & Canvas Logic ---
+
+            // This effect runs a tight loop to paint the video frame to the canvas
+            useEffect(() => {
+                let animationFrameId;
+                
+                const renderLoop = () => {
+                    if (videoSrc && videoRef.current && canvasRef.current && videoMeta.loaded) {
+                        const video = videoRef.current;
+                        const canvas = canvasRef.current;
+                        const ctx = canvas.getContext('2d');
+                        
+                        // Check if video has data to render
+                        if (video.readyState >= 2) { 
+                            // 2 = HAVE_CURRENT_DATA
+                            // Sync canvas size to video size (once or on resize)
+                            if (canvas.width !== video.videoWidth && video.videoWidth > 0) {
+                                canvas.width = video.videoWidth;
+                                canvas.height = video.videoHeight;
+                            }
+                            
+                            if (canvas.width > 0 && canvas.height > 0) {
+                                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            }
+                        }
+                    }
+                    animationFrameId = requestAnimationFrame(renderLoop);
+                };
+                
+                // Start the loop if video is active
+                if (videoSrc) {
+                    renderLoop();
+                }
+                
+                return () => cancelAnimationFrame(animationFrameId);
+            }, [videoSrc, videoMeta.loaded]);
+
 
             const updateVideoPosition = (normalizedPosition) => {
                 if (videoRef.current && videoMeta.loaded && videoMeta.duration > 0) {
                      const time = normalizedPosition * videoMeta.duration;
-                     // Ensure time is valid
                      if (isFinite(time)) {
-                        // Use fastSeek if available for smoother scrubbing
-                        if (videoRef.current.fastSeek) {
-                            videoRef.current.fastSeek(time);
-                        } else {
-                            videoRef.current.currentTime = time;
-                        }
+                        // We use direct currentTime assignment for frame-by-frame scrubbing.
+                        // We avoid fastSeek() because it snaps to keyframes (often causing black screens if keyframes are sparse).
+                        videoRef.current.currentTime = time;
                      }
                 }
             };
+
+            // --- Sensor Logic ---
 
             const handleOrientation = (event) => {
                 if (mode !== 'tilt') return;
@@ -136,13 +171,11 @@
                 const minTilt = -10;
                 const maxTilt = 70;
                 
-                // Calculate normalized position (0.0 to 1.0)
                 let normalized = (tilt - minTilt) / (maxTilt - minTilt);
                 normalized = Math.max(0, Math.min(1, normalized));
 
-                // Update state
                 setSliceIndex(normalized);
-                positionRef.current = normalized; // Sync physics ref
+                positionRef.current = normalized; 
                 setDebugInfo({ z: tilt.toFixed(1), v: 0 });
 
                 updateVideoPosition(normalized);
@@ -158,13 +191,11 @@
 
                 const cleanAcc = Math.abs(accZ) < 0.2 ? 0 : accZ;
 
-                // Physics update
-                velocityRef.current += (cleanAcc * dt * 0.5); // Sensitivity factor
-                velocityRef.current *= 0.90; // Friction
+                velocityRef.current += (cleanAcc * dt * 0.5); 
+                velocityRef.current *= 0.90; 
 
                 positionRef.current += velocityRef.current;
 
-                // Clamp 0.0 to 1.0
                 if (positionRef.current < 0) {
                     positionRef.current = 0;
                     velocityRef.current = 0;
@@ -200,14 +231,12 @@
                 const file = files[0];
 
                 if (file.type.startsWith('video/')) {
-                    // Video Mode
                     const url = URL.createObjectURL(file);
                     setVideoSrc(url);
                     setImages([]);
                     setVideoMeta({ name: file.name, duration: 0, loaded: false });
                     setStatus(`Loading Video: ${file.name}...`);
                 } else {
-                    // Image Sequence Mode
                     files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
                     const imageUrls = files.map(f => URL.createObjectURL(f));
                     setImages(imageUrls);
@@ -215,7 +244,6 @@
                     setStatus(`Loaded ${files.length} images`);
                 }
                 
-                // Reset Position
                 setSliceIndex(0);
                 positionRef.current = 0;
             };
@@ -237,7 +265,7 @@
                         loaded: true
                     }));
                     setStatus('Video Ready');
-                    // Pause immediately to prevent auto-playing
+                    // Important: Ensure video is paused so it doesn't fight our scrubbing
                     videoRef.current.pause();
                 }
             };
@@ -248,16 +276,24 @@
                 if (videoSrc) {
                     return (
                         <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
+                            {/* Hidden Video Source */}
                             <video 
                                 ref={videoRef}
                                 src={videoSrc}
-                                className="w-full h-full object-contain pointer-events-none"
+                                className="absolute opacity-0 w-px h-px pointer-events-none" // Hidden but present
                                 playsInline
+                                webkit-playsinline="true"
                                 muted
+                                preload="auto"
                                 onLoadedMetadata={onVideoLoadedMetadata}
-                                // Handle potential initial black screen by ensuring it doesn't try to play
-                                autoPlay={false}
                             />
+                            
+                            {/* Visual Canvas Renderer */}
+                            <canvas 
+                                ref={canvasRef}
+                                className="max-w-full max-h-full object-contain pointer-events-none"
+                            />
+
                             {/* Detailed Info Overlay for Video */}
                             <div className="absolute top-4 left-4 flex flex-col gap-1 text-green-500 font-mono text-xs bg-black/70 p-2 rounded border border-green-900/30">
                                 <div className="font-bold text-green-400">{videoMeta.name || "Loading..."}</div>
@@ -268,9 +304,6 @@
                                     </span>
                                 </div>
                                 <div>Progress: {(sliceIndex * 100).toFixed(1)}%</div>
-                                <div className="text-green-600">
-                                    Est. Frame: {Math.floor(sliceIndex * videoMeta.duration * 30)} (at 30fps)
-                                </div>
                             </div>
                         </div>
                     );
@@ -298,8 +331,8 @@
                 const totalDemoSlices = 100;
                 const center = 0.5;
                 const dist = Math.abs(sliceIndex - center);
-                const radius = Math.sqrt(0.25 - (dist * dist)); // Simple sphere math
-                const safeRadius = isNaN(radius) ? 0 : radius * 2; // Diameter 0 to 1
+                const radius = Math.sqrt(0.25 - (dist * dist));
+                const safeRadius = isNaN(radius) ? 0 : radius * 2;
 
                 return (
                     <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-white">
