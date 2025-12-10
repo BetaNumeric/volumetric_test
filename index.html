@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle } from 'lucide-react';
+import { Upload, Smartphone, Move, Rotate3D, Layers, Info } from 'lucide-react';
 
 const App = () => {
   // --- State ---
@@ -8,56 +8,35 @@ const App = () => {
   const [mode, setMode] = useState('tilt'); // 'tilt' or 'motion'
   const [status, setStatus] = useState('Waiting for input...');
   const [permissionGranted, setPermissionGranted] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
   const [debugInfo, setDebugInfo] = useState({ z: 0, v: 0 });
   
   // Refs for physics loop
   const positionRef = useRef(50); // Start in middle (0-100)
   const velocityRef = useRef(0);
   const lastTimeRef = useRef(Date.now());
+  const animationFrameRef = useRef(null);
 
   // --- Helpers ---
 
-  // Request Permission (Robust iOS Handling)
+  // Request Permission (Crucial for iOS 13+)
   const requestAccess = async () => {
-    setErrorMessage(''); // Clear previous errors
-
-    // 1. Check if HTTPS (Crucial for iOS)
-    if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-      setErrorMessage("iOS requires HTTPS for sensors. This app may not work on http://.");
-    }
-
-    // 2. iOS 13+ Permission Logic
-    if (
-      typeof DeviceOrientationEvent !== 'undefined' && 
-      typeof DeviceOrientationEvent.requestPermission === 'function'
-    ) {
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
-        // Requesting Orientation permission usually unlocks Motion as well
-        const response = await DeviceOrientationEvent.requestPermission();
-        
+        const response = await DeviceMotionEvent.requestPermission();
         if (response === 'granted') {
-          // Double check Motion permission just in case
-          if (typeof DeviceMotionEvent.requestPermission === 'function') {
-             try { await DeviceMotionEvent.requestPermission(); } catch (e) { /* Ignore redundant error */ }
-          }
-
           setPermissionGranted(true);
           setStatus('Sensors Active');
         } else {
           setStatus('Permission Denied');
-          setErrorMessage("Permission was denied. Please go to Settings -> Safari -> Clear History & Website Data to reset, or check per-site settings.");
         }
       } catch (e) {
         console.error(e);
         setStatus('Error requesting permission');
-        setErrorMessage(e.message || "Unknown error occurred.");
       }
     } else {
       // Non-iOS 13+ devices (Android, older iOS) usually don't need explicit permission
-      // However, if we are here and nothing happens, the device might not support it.
       setPermissionGranted(true);
-      setStatus('Sensors Active (Legacy Mode)');
+      setStatus('Sensors Active');
     }
   };
 
@@ -68,6 +47,7 @@ const App = () => {
     if (mode !== 'tilt') return;
     
     // Beta is the front-to-back tilt (-180 to 180)
+    // We map a comfortable range (e.g., 0 to 60 degrees) to slices
     let tilt = event.beta || 0;
     
     // Clamp tilt to a usable viewing angle
@@ -91,6 +71,8 @@ const App = () => {
     // Linear acceleration (removing gravity)
     const accZ = event.acceleration.z || 0; 
     
+    // Physics update in animation loop would be smoother, but event-driven is okay for simple logic
+    // We use a simplified physics model here to prevent infinite drift
     const now = Date.now();
     const dt = (now - lastTimeRef.current) / 1000;
     lastTimeRef.current = now;
@@ -99,8 +81,13 @@ const App = () => {
     const cleanAcc = Math.abs(accZ) < 0.2 ? 0 : accZ;
 
     // Update Velocity
+    // We reverse sign because moving phone "forward" (away) usually reads as negative Z depending on implementation,
+    // but we want "Forward" to go deeper into the stack.
     velocityRef.current += (cleanAcc * dt * 50); 
-    velocityRef.current *= 0.90; // Friction
+
+    // Apply Friction (Damping) - CRITICAL for usability
+    // Without this, the slice will drift forever after one movement
+    velocityRef.current *= 0.90; 
 
     // Update Position
     positionRef.current += velocityRef.current;
@@ -148,6 +135,7 @@ const App = () => {
 
   // --- Rendering ---
   
+  // Render the current view (Image, Generated Sphere, or Number)
   const renderContent = () => {
     // 1. Image Mode
     if (images.length > 0) {
@@ -166,6 +154,7 @@ const App = () => {
     }
 
     // 2. Demo Mode (Procedural Sphere)
+    // We simulate a sphere by drawing a circle that gets bigger then smaller
     const totalDemoSlices = 100;
     const center = totalDemoSlices / 2;
     const radius = Math.sqrt(Math.pow(center, 2) - Math.pow(sliceIndex - center, 2));
@@ -237,31 +226,14 @@ const App = () => {
           <div className="absolute inset-0 z-50 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center">
             <Smartphone className="w-16 h-16 text-blue-500 mb-4 animate-pulse" />
             <h2 className="text-2xl font-bold mb-2">Sensor Access Needed</h2>
-            
-            {errorMessage ? (
-               <div className="bg-red-500/20 border border-red-500 p-4 rounded-lg mb-4 text-red-200 text-sm max-w-xs flex flex-col items-center gap-2">
-                 <AlertTriangle className="w-6 h-6" />
-                 <p>{errorMessage}</p>
-               </div>
-            ) : (
-              <p className="text-slate-400 mb-6 max-w-xs">
-                To track your phone's position and tilt, we need access to the accelerometer and gyroscope.
-              </p>
-            )}
-
+            <p className="text-slate-400 mb-6 max-w-xs">
+              To track your phone's position and tilt, we need access to the accelerometer and gyroscope.
+            </p>
             <button 
               onClick={requestAccess}
               className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform active:scale-95"
             >
               Enable Sensors
-            </button>
-            
-            {/* Fallback button for testing on non-sensor devices or if auto-detection fails */}
-            <button 
-              onClick={() => setPermissionGranted(true)}
-              className="mt-6 text-slate-500 text-xs underline"
-            >
-              Force Enable (Development)
             </button>
           </div>
         )}
