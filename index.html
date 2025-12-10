@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.1_SliceView</title>
+    <title>v0.2_SliceView_VideoFix</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -57,12 +57,13 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, PlayCircle, FileVideo } from 'lucide-react';
+        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, FileVideo, Clock } from 'lucide-react';
 
         const App = () => {
             // --- State ---
             const [images, setImages] = useState([]);
             const [videoSrc, setVideoSrc] = useState(null);
+            const [videoMeta, setVideoMeta] = useState({ name: '', duration: 0, loaded: false });
             const [sliceIndex, setSliceIndex] = useState(0); // 0.0 to 1.0 (float)
             const [mode, setMode] = useState('tilt'); // 'tilt' or 'motion'
             const [status, setStatus] = useState('Waiting for input...');
@@ -113,6 +114,21 @@
 
             // --- Sensor Logic ---
 
+            const updateVideoPosition = (normalizedPosition) => {
+                if (videoRef.current && videoMeta.loaded && videoMeta.duration > 0) {
+                     const time = normalizedPosition * videoMeta.duration;
+                     // Ensure time is valid
+                     if (isFinite(time)) {
+                        // Use fastSeek if available for smoother scrubbing
+                        if (videoRef.current.fastSeek) {
+                            videoRef.current.fastSeek(time);
+                        } else {
+                            videoRef.current.currentTime = time;
+                        }
+                     }
+                }
+            };
+
             const handleOrientation = (event) => {
                 if (mode !== 'tilt') return;
                 
@@ -129,16 +145,7 @@
                 positionRef.current = normalized; // Sync physics ref
                 setDebugInfo({ z: tilt.toFixed(1), v: 0 });
 
-                // Update Video if active
-                if (videoRef.current && videoRef.current.duration) {
-                     const time = normalized * videoRef.current.duration;
-                     // Use fastSeek if available for smoother scrubbing, else currentTime
-                     if (videoRef.current.fastSeek) {
-                         videoRef.current.fastSeek(time);
-                     } else {
-                         videoRef.current.currentTime = time;
-                     }
-                }
+                updateVideoPosition(normalized);
             };
 
             const handleMotion = (event) => {
@@ -170,10 +177,7 @@
                 setSliceIndex(positionRef.current);
                 setDebugInfo({ z: cleanAcc.toFixed(2), v: velocityRef.current.toFixed(2) });
 
-                // Update Video if active
-                if (videoRef.current && videoRef.current.duration) {
-                    videoRef.current.currentTime = positionRef.current * videoRef.current.duration;
-                }
+                updateVideoPosition(positionRef.current);
             };
 
             useEffect(() => {
@@ -185,7 +189,7 @@
                     window.removeEventListener('deviceorientation', handleOrientation);
                     window.removeEventListener('devicemotion', handleMotion);
                 };
-            }, [permissionGranted, mode, images.length, videoSrc]);
+            }, [permissionGranted, mode, images.length, videoSrc, videoMeta.loaded]);
 
             // --- File Handling ---
             
@@ -200,7 +204,8 @@
                     const url = URL.createObjectURL(file);
                     setVideoSrc(url);
                     setImages([]);
-                    setStatus(`Loaded Video: ${file.name}`);
+                    setVideoMeta({ name: file.name, duration: 0, loaded: false });
+                    setStatus(`Loading Video: ${file.name}...`);
                 } else {
                     // Image Sequence Mode
                     files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
@@ -216,12 +221,25 @@
             };
 
             const loadSampleVideo = () => {
-                // Looks for "video/scan.mp4" relative to index.html
                 setVideoSrc('./video/scan.mp4');
                 setImages([]);
-                setStatus('Loaded Sample Video');
+                setVideoMeta({ name: 'Sample Scan (scan.mp4)', duration: 0, loaded: false });
+                setStatus('Loading Sample Video...');
                 setSliceIndex(0);
                 positionRef.current = 0;
+            };
+
+            const onVideoLoadedMetadata = () => {
+                if (videoRef.current) {
+                    setVideoMeta(prev => ({
+                        ...prev,
+                        duration: videoRef.current.duration,
+                        loaded: true
+                    }));
+                    setStatus('Video Ready');
+                    // Pause immediately to prevent auto-playing
+                    videoRef.current.pause();
+                }
             };
 
             // --- Render Content ---
@@ -236,10 +254,23 @@
                                 className="w-full h-full object-contain pointer-events-none"
                                 playsInline
                                 muted
-                                preload="auto"
+                                onLoadedMetadata={onVideoLoadedMetadata}
+                                // Handle potential initial black screen by ensuring it doesn't try to play
+                                autoPlay={false}
                             />
-                            <div className="absolute top-4 left-4 text-green-500 font-mono text-xs bg-black/50 p-1">
-                                VIDEO MODE: {(sliceIndex * 100).toFixed(0)}%
+                            {/* Detailed Info Overlay for Video */}
+                            <div className="absolute top-4 left-4 flex flex-col gap-1 text-green-500 font-mono text-xs bg-black/70 p-2 rounded border border-green-900/30">
+                                <div className="font-bold text-green-400">{videoMeta.name || "Loading..."}</div>
+                                <div className="flex items-center gap-2">
+                                    <Clock className="w-3 h-3" />
+                                    <span>
+                                        {(sliceIndex * videoMeta.duration).toFixed(2)}s / {videoMeta.duration.toFixed(2)}s
+                                    </span>
+                                </div>
+                                <div>Progress: {(sliceIndex * 100).toFixed(1)}%</div>
+                                <div className="text-green-600">
+                                    Est. Frame: {Math.floor(sliceIndex * videoMeta.duration * 30)} (at 30fps)
+                                </div>
                             </div>
                         </div>
                     );
