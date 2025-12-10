@@ -57,22 +57,24 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle } from 'lucide-react';
+        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, PlayCircle, FileVideo } from 'lucide-react';
 
         const App = () => {
             // --- State ---
             const [images, setImages] = useState([]);
-            const [sliceIndex, setSliceIndex] = useState(0);
+            const [videoSrc, setVideoSrc] = useState(null);
+            const [sliceIndex, setSliceIndex] = useState(0); // 0.0 to 1.0 (float)
             const [mode, setMode] = useState('tilt'); // 'tilt' or 'motion'
             const [status, setStatus] = useState('Waiting for input...');
             const [permissionGranted, setPermissionGranted] = useState(false);
             const [errorMessage, setErrorMessage] = useState('');
             const [debugInfo, setDebugInfo] = useState({ z: 0, v: 0 });
             
-            // Refs for physics loop
-            const positionRef = useRef(50); // Start in middle (0-100)
+            // Refs
+            const positionRef = useRef(0.5); // Start in middle (0.0 - 1.0)
             const velocityRef = useRef(0);
             const lastTimeRef = useRef(Date.now());
+            const videoRef = useRef(null);
 
             // --- Helpers ---
 
@@ -118,13 +120,25 @@
                 const minTilt = -10;
                 const maxTilt = 70;
                 
+                // Calculate normalized position (0.0 to 1.0)
                 let normalized = (tilt - minTilt) / (maxTilt - minTilt);
                 normalized = Math.max(0, Math.min(1, normalized));
 
-                const totalSlices = images.length > 0 ? images.length : 100;
-                const newIndex = Math.floor(normalized * (totalSlices - 1));
-                setSliceIndex(newIndex);
+                // Update state
+                setSliceIndex(normalized);
+                positionRef.current = normalized; // Sync physics ref
                 setDebugInfo({ z: tilt.toFixed(1), v: 0 });
+
+                // Update Video if active
+                if (videoRef.current && videoRef.current.duration) {
+                     const time = normalized * videoRef.current.duration;
+                     // Use fastSeek if available for smoother scrubbing, else currentTime
+                     if (videoRef.current.fastSeek) {
+                         videoRef.current.fastSeek(time);
+                     } else {
+                         videoRef.current.currentTime = time;
+                     }
+                }
             };
 
             const handleMotion = (event) => {
@@ -137,23 +151,29 @@
 
                 const cleanAcc = Math.abs(accZ) < 0.2 ? 0 : accZ;
 
-                velocityRef.current += (cleanAcc * dt * 50); 
-                velocityRef.current *= 0.90; 
+                // Physics update
+                velocityRef.current += (cleanAcc * dt * 0.5); // Sensitivity factor
+                velocityRef.current *= 0.90; // Friction
 
                 positionRef.current += velocityRef.current;
 
+                // Clamp 0.0 to 1.0
                 if (positionRef.current < 0) {
                     positionRef.current = 0;
                     velocityRef.current = 0;
                 }
-                const maxPos = images.length > 0 ? images.length - 1 : 100;
-                if (positionRef.current > maxPos) {
-                    positionRef.current = maxPos;
+                if (positionRef.current > 1) {
+                    positionRef.current = 1;
                     velocityRef.current = 0;
                 }
 
-                setSliceIndex(Math.floor(positionRef.current));
+                setSliceIndex(positionRef.current);
                 setDebugInfo({ z: cleanAcc.toFixed(2), v: velocityRef.current.toFixed(2) });
+
+                // Update Video if active
+                if (videoRef.current && videoRef.current.duration) {
+                    videoRef.current.currentTime = positionRef.current * videoRef.current.duration;
+                }
             };
 
             useEffect(() => {
@@ -165,59 +185,113 @@
                     window.removeEventListener('deviceorientation', handleOrientation);
                     window.removeEventListener('devicemotion', handleMotion);
                 };
-            }, [permissionGranted, mode, images.length]);
+            }, [permissionGranted, mode, images.length, videoSrc]);
 
             // --- File Handling ---
+            
             const handleFileUpload = (e) => {
                 const files = Array.from(e.target.files);
                 if (files.length === 0) return;
-                files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-                const imageUrls = files.map(file => URL.createObjectURL(file));
-                setImages(imageUrls);
+
+                const file = files[0];
+
+                if (file.type.startsWith('video/')) {
+                    // Video Mode
+                    const url = URL.createObjectURL(file);
+                    setVideoSrc(url);
+                    setImages([]);
+                    setStatus(`Loaded Video: ${file.name}`);
+                } else {
+                    // Image Sequence Mode
+                    files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+                    const imageUrls = files.map(f => URL.createObjectURL(f));
+                    setImages(imageUrls);
+                    setVideoSrc(null);
+                    setStatus(`Loaded ${files.length} images`);
+                }
+                
+                // Reset Position
                 setSliceIndex(0);
                 positionRef.current = 0;
-                setStatus(`Loaded ${files.length} images`);
+            };
+
+            const loadSampleVideo = () => {
+                // Looks for "video/scan.mp4" relative to index.html
+                setVideoSrc('./video/scan.mp4');
+                setImages([]);
+                setStatus('Loaded Sample Video');
+                setSliceIndex(0);
+                positionRef.current = 0;
             };
 
             // --- Render Content ---
             const renderContent = () => {
-                if (images.length > 0) {
+                // 1. Video Mode
+                if (videoSrc) {
                     return (
                         <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
-                            <img 
-                                src={images[sliceIndex]} 
-                                alt={`Slice ${sliceIndex}`}
-                                className="max-w-full max-h-full object-contain pointer-events-none select-none"
+                            <video 
+                                ref={videoRef}
+                                src={videoSrc}
+                                className="w-full h-full object-contain pointer-events-none"
+                                playsInline
+                                muted
+                                preload="auto"
                             />
                             <div className="absolute top-4 left-4 text-green-500 font-mono text-xs bg-black/50 p-1">
-                                IMG: {images[sliceIndex].split('/').pop()}
+                                VIDEO MODE: {(sliceIndex * 100).toFixed(0)}%
                             </div>
                         </div>
                     );
                 }
 
+                // 2. Image Sequence Mode
+                if (images.length > 0) {
+                    const idx = Math.floor(sliceIndex * (images.length - 1));
+                    const safeIdx = Math.max(0, Math.min(idx, images.length - 1));
+                    return (
+                        <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
+                            <img 
+                                src={images[safeIdx]} 
+                                alt={`Slice ${safeIdx}`}
+                                className="max-w-full max-h-full object-contain pointer-events-none select-none"
+                            />
+                            <div className="absolute top-4 left-4 text-green-500 font-mono text-xs bg-black/50 p-1">
+                                IMG: {safeIdx + 1} / {images.length}
+                            </div>
+                        </div>
+                    );
+                }
+
+                // 3. Demo Mode
                 const totalDemoSlices = 100;
-                const center = totalDemoSlices / 2;
-                const radius = Math.sqrt(Math.pow(center, 2) - Math.pow(sliceIndex - center, 2));
-                const safeRadius = isNaN(radius) ? 0 : radius;
-                const scale = safeRadius / center;
+                const center = 0.5;
+                const dist = Math.abs(sliceIndex - center);
+                const radius = Math.sqrt(0.25 - (dist * dist)); // Simple sphere math
+                const safeRadius = isNaN(radius) ? 0 : radius * 2; // Diameter 0 to 1
 
                 return (
                     <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-white">
                         <div 
                             className="rounded-full bg-red-500/80 shadow-[0_0_50px_rgba(239,68,68,0.5)] transition-all duration-75 ease-linear"
                             style={{
-                                width: `${300 * scale}px`,
-                                height: `${300 * scale}px`,
-                                opacity: scale > 0 ? 1 : 0
+                                width: `${300 * safeRadius}px`,
+                                height: `${300 * safeRadius}px`,
+                                opacity: safeRadius > 0 ? 1 : 0
                             }}
                         />
                         <div className="mt-8 font-mono text-4xl text-slate-500 select-none">
-                            SLICE {sliceIndex}
+                            {(sliceIndex * 100).toFixed(0)}%
                         </div>
                         <p className="text-slate-600 text-sm mt-2">
-                            (No images loaded. Generating demo object)
+                            (No media loaded)
                         </p>
+                        <button 
+                             onClick={loadSampleVideo}
+                             className="mt-6 flex items-center gap-2 bg-slate-800 hover:bg-slate-700 px-4 py-2 rounded-full text-sm text-blue-400 border border-slate-700 transition-colors"
+                        >
+                            <FileVideo className="w-4 h-4" /> Load Sample Video (video/scan.mp4)
+                        </button>
                     </div>
                 );
             };
@@ -247,7 +321,7 @@
                         </div>
 
                         <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-lg transition-colors">
-                            <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileUpload} />
+                            <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
                             <Upload className="w-5 h-5" />
                         </label>
                     </div>
@@ -279,7 +353,6 @@
                         <div className="absolute bottom-6 left-0 right-0 flex justify-center pointer-events-none">
                             <div className="bg-slate-900/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700 text-xs font-mono text-slate-300 flex gap-4">
                                 <span>MODE: {mode.toUpperCase()}</span>
-                                <span>IDX: {sliceIndex}</span>
                                 <span className="text-slate-500">{mode === 'tilt' ? `TILT: ${debugInfo.z}°` : `ACC: ${debugInfo.z}`}</span>
                             </div>
                         </div>
