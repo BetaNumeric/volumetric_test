@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.4_SliceView_SmartSeek</title>
+    <title>v0.5_SliceView_RobustMotion</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -57,7 +57,7 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play } from 'lucide-react';
+        import { Upload, Smartphone, Move, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play, Crosshair } from 'lucide-react';
 
         const App = () => {
             // --- State ---
@@ -115,7 +115,6 @@
 
             // --- Video Logic ---
 
-            // This function "unlocks" the video on mobile by playing it briefly
             const initializeVideo = () => {
                 if (videoRef.current) {
                     videoRef.current.play().then(() => {
@@ -134,10 +133,6 @@
                      
                      if (isFinite(targetTime)) {
                         const video = videoRef.current;
-                        
-                        // SMART SEEKING:
-                        // 1. Don't seek if we are already seeking (prevents black screen freeze)
-                        // 2. Only seek if the difference is significant (prevents micro-stutter)
                         if (!video.seeking) {
                              if (Math.abs(video.currentTime - targetTime) > 0.05) { 
                                  video.currentTime = targetTime;
@@ -147,17 +142,14 @@
                 }
             };
 
-            // Render loop to paint video to canvas
+            // Render loop
             useEffect(() => {
                 let animationFrameId;
-                
                 const renderLoop = () => {
                     if (videoSrc && videoRef.current && canvasRef.current && videoMeta.loaded) {
                         const video = videoRef.current;
                         const canvas = canvasRef.current;
                         const ctx = canvas.getContext('2d');
-                        
-                        // If video is ready (HAVE_CURRENT_DATA or greater)
                         if (video.readyState >= 2) { 
                             if (canvas.width !== video.videoWidth && video.videoWidth > 0) {
                                 canvas.width = video.videoWidth;
@@ -170,11 +162,9 @@
                     }
                     animationFrameId = requestAnimationFrame(renderLoop);
                 };
-                
                 if (videoSrc) {
                     renderLoop();
                 }
-                
                 return () => cancelAnimationFrame(animationFrameId);
             }, [videoSrc, videoMeta.loaded]);
 
@@ -201,31 +191,68 @@
             const handleMotion = (event) => {
                 if (mode !== 'motion') return;
 
+                // 1. Get Acceleration (Linear, No Gravity)
                 const accZ = event.acceleration.z || 0; 
                 const now = Date.now();
                 const dt = (now - lastTimeRef.current) / 1000;
                 lastTimeRef.current = now;
 
-                const cleanAcc = Math.abs(accZ) < 0.2 ? 0 : accZ;
+                // 2. Strong Deadzone (Ignore small jitters)
+                // Increased from 0.2 to 0.4 for stability
+                const cleanAcc = Math.abs(accZ) < 0.4 ? 0 : accZ;
 
-                velocityRef.current += (cleanAcc * dt * 0.5); 
-                velocityRef.current *= 0.90; 
+                // 3. Update Velocity with "Fluid" Physics
+                // We add acceleration to velocity
+                velocityRef.current += (cleanAcc * dt * 0.8); // 0.8 is sensitivity
 
+                // 4. Smart Braking
+                // If velocity and acceleration are opposite (trying to stop), brake harder
+                const isBraking = (velocityRef.current > 0 && cleanAcc < 0) || (velocityRef.current < 0 && cleanAcc > 0);
+                
+                if (cleanAcc === 0) {
+                    // Not moving? Apply heavy friction (Heavy Fluid)
+                    velocityRef.current *= 0.85; 
+                } else if (isBraking) {
+                    // Counter-acting? Apply extreme friction
+                    velocityRef.current *= 0.60;
+                } else {
+                    // Moving normally? Light friction
+                    velocityRef.current *= 0.95;
+                }
+                
+                // 5. Hard Velocity Cap (Speed Limit)
+                // Prevents "flying off" into infinity
+                const maxVelocity = 0.8;
+                velocityRef.current = Math.max(-maxVelocity, Math.min(maxVelocity, velocityRef.current));
+
+                // 6. Stop completely if very slow
+                if (Math.abs(velocityRef.current) < 0.001) velocityRef.current = 0;
+
+                // 7. Update Position
                 positionRef.current += velocityRef.current;
 
+                // Clamp Boundaries (0.0 to 1.0)
                 if (positionRef.current < 0) {
                     positionRef.current = 0;
-                    velocityRef.current = 0;
+                    velocityRef.current = 0; // Hit wall
                 }
                 if (positionRef.current > 1) {
                     positionRef.current = 1;
-                    velocityRef.current = 0;
+                    velocityRef.current = 0; // Hit wall
                 }
 
                 setSliceIndex(positionRef.current);
                 setDebugInfo({ z: cleanAcc.toFixed(2), v: velocityRef.current.toFixed(2) });
 
                 updateVideoPosition(positionRef.current);
+            };
+
+            // Reset Logic for Motion Mode
+            const recenter = () => {
+                positionRef.current = 0.5;
+                velocityRef.current = 0;
+                setSliceIndex(0.5);
+                updateVideoPosition(0.5);
             };
 
             useEffect(() => {
@@ -287,11 +314,9 @@
 
             // --- Render Content ---
             const renderContent = () => {
-                // 1. Video Mode
                 if (videoSrc) {
                     return (
                         <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden group">
-                            {/* Hidden Video Source */}
                             <video 
                                 ref={videoRef}
                                 src={videoSrc}
@@ -303,13 +328,8 @@
                                 onLoadedMetadata={onVideoLoadedMetadata}
                             />
                             
-                            {/* Visual Canvas Renderer */}
-                            <canvas 
-                                ref={canvasRef}
-                                className="max-w-full max-h-full object-contain pointer-events-none"
-                            />
+                            <canvas ref={canvasRef} className="max-w-full max-h-full object-contain pointer-events-none" />
 
-                            {/* Initialization Overlay (Required for Mobile) */}
                             {!videoMeta.readyToPlay && (
                                 <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-20">
                                     <button 
@@ -322,7 +342,16 @@
                                 </div>
                             )}
 
-                            {/* Detailed Info Overlay */}
+                            {/* Motion Mode Recenter Button */}
+                            {mode === 'motion' && videoMeta.readyToPlay && (
+                                <button 
+                                    onClick={recenter}
+                                    className="absolute right-4 bottom-20 z-30 bg-blue-600/80 hover:bg-blue-500 text-white p-3 rounded-full shadow-lg backdrop-blur"
+                                >
+                                    <Crosshair className="w-6 h-6" />
+                                </button>
+                            )}
+
                             <div className="absolute top-4 left-4 flex flex-col gap-1 text-green-500 font-mono text-xs bg-black/70 p-2 rounded border border-green-900/30 pointer-events-none">
                                 <div className="font-bold text-green-400">{videoMeta.name || "Loading..."}</div>
                                 <div className="flex items-center gap-2">
@@ -337,7 +366,6 @@
                     );
                 }
 
-                // 2. Image Sequence Mode
                 if (images.length > 0) {
                     const idx = Math.floor(sliceIndex * (images.length - 1));
                     const safeIdx = Math.max(0, Math.min(idx, images.length - 1));
@@ -348,6 +376,15 @@
                                 alt={`Slice ${safeIdx}`}
                                 className="max-w-full max-h-full object-contain pointer-events-none select-none"
                             />
+                            {/* Motion Mode Recenter Button */}
+                            {mode === 'motion' && (
+                                <button 
+                                    onClick={recenter}
+                                    className="absolute right-4 bottom-20 z-30 bg-blue-600/80 hover:bg-blue-500 text-white p-3 rounded-full shadow-lg backdrop-blur"
+                                >
+                                    <Crosshair className="w-6 h-6" />
+                                </button>
+                            )}
                             <div className="absolute top-4 left-4 text-green-500 font-mono text-xs bg-black/50 p-1">
                                 IMG: {safeIdx + 1} / {images.length}
                             </div>
@@ -355,7 +392,6 @@
                     );
                 }
 
-                // 3. Demo Mode
                 const totalDemoSlices = 100;
                 const center = 0.5;
                 const dist = Math.abs(sliceIndex - center);
@@ -372,6 +408,15 @@
                                 opacity: safeRadius > 0 ? 1 : 0
                             }}
                         />
+                         {/* Motion Mode Recenter Button */}
+                         {mode === 'motion' && (
+                            <button 
+                                onClick={recenter}
+                                className="absolute right-4 bottom-20 z-30 bg-blue-600/80 hover:bg-blue-500 text-white p-3 rounded-full shadow-lg backdrop-blur"
+                            >
+                                <Crosshair className="w-6 h-6" />
+                            </button>
+                        )}
                         <div className="mt-8 font-mono text-4xl text-slate-500 select-none">
                             {(sliceIndex * 100).toFixed(0)}%
                         </div>
@@ -451,7 +496,7 @@
                     </div>
 
                     <div className="flex-none bg-slate-900 p-2 text-center text-xs text-slate-500">
-                        {mode === 'tilt' ? "Tip: Tilt phone forward/back." : "Tip: Push/Pull phone physically."}
+                        {mode === 'tilt' ? "Tip: Tilt phone forward/back." : "Tip: Push/Pull phone physically. Use target button to recenter."}
                     </div>
                 </div>
             );
