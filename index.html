@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v1.0_SliceView_Settings</title>
+    <title>v1.1_SliceView_SettingsFix</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -38,14 +38,27 @@
         /* Global scroll prevention for app-like feel */
         body, html {
             overscroll-behavior: none;
-            touch-action: none;
+            touch-action: none; /* Disables browser handling of gestures/scrolling */
             height: 100%;
             width: 100%;
             overflow: hidden;
         }
-        /* Custom range slider styling */
+        
+        /* FIX: Re-enable touch interactions specifically for sliders */
         input[type=range] {
             @apply h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer;
+            touch-action: pan-y; /* Allows horizontal drag on the slider */
+        }
+        
+        /* Styling for the slider thumb to make it easier to grab on mobile */
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 20px;
+            width: 20px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            box-shadow: 0 0 2px rgba(0,0,0,0.5);
         }
     </style>
 </head>
@@ -298,6 +311,13 @@
             // --- 5. TOUCH LOGIC ---
             const handleTouchMove = (e) => {
                 if (mode !== 'touch') return;
+                
+                // FIX: Check if we are interacting with the settings modal
+                // If the target is inside the settings modal, do NOT prevent default or update slice
+                if (e.target.closest('.settings-modal-content')) {
+                    return;
+                }
+
                 if(e.cancelable) e.preventDefault();
                 
                 const clientY = e.touches ? e.touches[0].clientY : e.clientY;
@@ -357,8 +377,16 @@
             // --- COMPONENTS ---
             
             const SettingsModal = () => (
-                <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl shadow-2xl p-6 animate-fade-in-up">
+                <div 
+                    className="absolute inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 settings-modal"
+                    onClick={(e) => {
+                        // Close if clicked outside the content
+                        if (e.target === e.currentTarget) setShowSettings(false);
+                    }}
+                    onMouseMove={(e) => e.stopPropagation()} // Stop bubbling to main view
+                    onTouchMove={(e) => e.stopPropagation()} // Stop bubbling to main view
+                >
+                    <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl shadow-2xl p-6 animate-fade-in-up settings-modal-content">
                         <div className="flex justify-between items-center mb-6">
                             <h2 className="text-xl font-bold flex items-center gap-2"><Settings className="w-5 h-5 text-blue-400" /> Settings</h2>
                             <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white">
