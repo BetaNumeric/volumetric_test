@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.9_SliceView_FinalPolish</title>
+    <title>v1.0_SliceView_Settings</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -43,6 +43,10 @@
             width: 100%;
             overflow: hidden;
         }
+        /* Custom range slider styling */
+        input[type=range] {
+            @apply h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer;
+        }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 h-screen w-screen overflow-hidden">
@@ -64,7 +68,7 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Smartphone, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play, User, MousePointer2, Maximize, Minimize, ArrowUpDown } from 'lucide-react';
+        import { Upload, Smartphone, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play, User, MousePointer2, Maximize, Minimize, Settings, X, ArrowUpDown } from 'lucide-react';
 
         const App = () => {
             // --- State ---
@@ -79,18 +83,25 @@
             const [errorMessage, setErrorMessage] = useState('');
             const [debugInfo, setDebugInfo] = useState({ val: 0, label: '-' });
             
-            // Reverse State
-            const [reverse, setReverse] = useState(false);
-            
+            // Settings State
+            const [showSettings, setShowSettings] = useState(false);
+            const [config, setConfig] = useState({
+                reverse: false,
+                tiltMin: -10,
+                tiltMax: 70,
+                faceMin: 60,  // Far (Small width)
+                faceMax: 180  // Close (Large width)
+            });
+
             // Fullscreen State
             const [isFullscreen, setIsFullscreen] = useState(false);
             const [showControls, setShowControls] = useState(false);
             
-            // Refs
+            // Refs for loops
             const positionRef = useRef(0.5); 
-            const reverseRef = useRef(false); 
+            const configRef = useRef(config); // To access latest config in loops
             const modeRef = useRef('tilt'); 
-            const streamRef = useRef(null); // Direct reference to the camera stream
+            const streamRef = useRef(null); 
             
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
@@ -98,7 +109,12 @@
             const faceModelRef = useRef(null);
 
             // Sync refs with state
-            useEffect(() => { reverseRef.current = reverse; updateVideoPosition(positionRef.current); }, [reverse]);
+            useEffect(() => { 
+                configRef.current = config; 
+                // Force update video position in case reverse changed
+                updateVideoPosition(positionRef.current); 
+            }, [config]);
+            
             useEffect(() => { modeRef.current = mode; }, [mode]);
 
             // --- 1. SENSOR PERMISSIONS (Tilt) ---
@@ -121,37 +137,20 @@
             };
 
             // --- 2. CAMERA SETUP (Face Mode) ---
-            
-            // Robust Stop Camera Function
             const stopCamera = () => {
-                // 1. Stop the specific stream we stored
                 if (streamRef.current) {
-                    const tracks = streamRef.current.getTracks();
-                    tracks.forEach(track => {
-                        track.stop();
-                    });
+                    streamRef.current.getTracks().forEach(track => track.stop());
                     streamRef.current = null;
                 }
-                
-                // 2. Safety Net: Check the video element itself
-                // Sometimes the stream reference is lost but the video element is still holding on to the hardware
                 if (webcamRef.current && webcamRef.current.srcObject) {
-                    const tracks = webcamRef.current.srcObject.getTracks();
-                    tracks.forEach(track => {
-                         track.stop();
-                    });
+                    webcamRef.current.srcObject.getTracks().forEach(track => track.stop());
                     webcamRef.current.srcObject = null;
                 }
-
                 setCameraActive(false);
             };
 
-            // Handle Mode Switching Cleanup
             useEffect(() => {
-                // If we leave face mode, kill the camera immediately
-                if (mode !== 'face') {
-                    stopCamera();
-                }
+                if (mode !== 'face') stopCamera();
             }, [mode]);
 
             const enableCamera = async () => {
@@ -162,8 +161,6 @@
                         const model = await blazeface.load();
                         faceModelRef.current = model;
                     }
-                    
-                    // Check if user switched away while loading model
                     if (modeRef.current !== 'face') return;
 
                     setStatus("Accessing Camera...");
@@ -171,13 +168,11 @@
                         video: { facingMode: 'user', width: 320, height: 240 } 
                     });
                     
-                    // Check if user switched away while requesting camera (Race Condition Fix)
                     if (modeRef.current !== 'face') {
                         stream.getTracks().forEach(track => track.stop());
                         return;
                     }
-
-                    streamRef.current = stream; // Store for cleanup
+                    streamRef.current = stream; 
 
                     if (webcamRef.current) {
                         webcamRef.current.srcObject = stream;
@@ -200,7 +195,6 @@
 
             const startFaceLoop = () => {
                 const loop = async () => {
-                    // Check modeRef instead of mode state to prevent stale closure issues
                     if (modeRef.current === 'face' && faceModelRef.current && webcamRef.current && webcamRef.current.readyState === 4) {
                         try {
                             const returnTensors = false;
@@ -211,10 +205,9 @@
                                 const end = predictions[0].bottomRight;
                                 const width = end[0] - start[0]; 
                                 
-                                // Heuristic: Face width 60px (far) to 180px (close)
-                                const minWidth = 60;
-                                const maxWidth = 180;
-                                let norm = (width - minWidth) / (maxWidth - minWidth);
+                                // Dynamic Range from Config
+                                const { faceMin, faceMax } = configRef.current;
+                                let norm = (width - faceMin) / (faceMax - faceMin);
                                 norm = Math.max(0, Math.min(1, norm));
 
                                 // Smooth interpolation
@@ -225,11 +218,7 @@
                             }
                         } catch(e) { /* ignore frame errors */ }
                     }
-                    
-                    // Keep looping if we are still in face mode
-                    if (modeRef.current === 'face') {
-                        requestAnimationFrame(loop);
-                    }
+                    if (modeRef.current === 'face') requestAnimationFrame(loop);
                 };
                 loop();
             };
@@ -246,8 +235,8 @@
 
             const updateVideoPosition = (normalizedPosition) => {
                 if (videoRef.current && videoMeta.loaded && videoMeta.readyToPlay && videoMeta.duration > 0) {
-                     // Apply Reverse Logic here for video seeking
-                     const effectivePos = reverseRef.current ? (1 - normalizedPosition) : normalizedPosition;
+                     // Reverse Logic
+                     const effectivePos = configRef.current.reverse ? (1 - normalizedPosition) : normalizedPosition;
                      
                      const targetTime = effectivePos * videoMeta.duration;
                      if (isFinite(targetTime) && !videoRef.current.seeking) {
@@ -287,9 +276,11 @@
                 const handleOrientation = (event) => {
                     if (modeRef.current !== 'tilt') return;
                     let tilt = event.beta || 0;
-                    const minTilt = -10;
-                    const maxTilt = 70;
-                    let normalized = (tilt - minTilt) / (maxTilt - minTilt);
+                    
+                    // Dynamic Range from Config
+                    const { tiltMin, tiltMax } = configRef.current;
+                    
+                    let normalized = (tilt - tiltMin) / (tiltMax - tiltMin);
                     normalized = Math.max(0, Math.min(1, normalized));
                     
                     setSliceIndex(normalized);
@@ -356,16 +347,98 @@
                 setShowControls(false);
             };
 
-            // --- RENDER HELPERS ---
-            
-            // Calculate effective index for Images based on Reverse state
             const getEffectiveImageIndex = () => {
                 if (images.length === 0) return 0;
                 const rawIdx = Math.floor(sliceIndex * (images.length - 1));
                 const clamped = Math.max(0, Math.min(rawIdx, images.length - 1));
-                
-                return reverse ? (images.length - 1 - clamped) : clamped;
+                return config.reverse ? (images.length - 1 - clamped) : clamped;
             };
+
+            // --- COMPONENTS ---
+            
+            const SettingsModal = () => (
+                <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl shadow-2xl p-6 animate-fade-in-up">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold flex items-center gap-2"><Settings className="w-5 h-5 text-blue-400" /> Settings</h2>
+                            <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="space-y-6">
+                            {/* General */}
+                            <div className="flex items-center justify-between bg-slate-800/50 p-3 rounded-xl">
+                                <span className="text-sm font-medium flex items-center gap-2"><ArrowUpDown className="w-4 h-4" /> Flip Order</span>
+                                <button 
+                                    onClick={() => setConfig({...config, reverse: !config.reverse})}
+                                    className={`w-12 h-6 rounded-full p-1 transition-colors ${config.reverse ? 'bg-blue-600' : 'bg-slate-600'}`}
+                                >
+                                    <div className={`w-4 h-4 bg-white rounded-full shadow-md transform transition-transform ${config.reverse ? 'translate-x-6' : 'translate-x-0'}`} />
+                                </button>
+                            </div>
+
+                            {/* Tilt Calibration */}
+                            <div>
+                                <h3 className="text-xs font-semibold text-slate-400 uppercase mb-3 tracking-wider">Tilt Range (Angles)</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <div className="flex justify-between text-xs mb-1">
+                                            <span>Start: {config.tiltMin}°</span>
+                                            <span className="text-slate-500">Back</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="-45" max="45" value={config.tiltMin} 
+                                            onChange={(e) => setConfig({...config, tiltMin: parseInt(e.target.value)})}
+                                            className="w-full accent-blue-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between text-xs mb-1">
+                                            <span>End: {config.tiltMax}°</span>
+                                            <span className="text-slate-500">Forward</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="45" max="135" value={config.tiltMax} 
+                                            onChange={(e) => setConfig({...config, tiltMax: parseInt(e.target.value)})}
+                                            className="w-full accent-blue-500"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Face Calibration */}
+                            <div>
+                                <h3 className="text-xs font-semibold text-slate-400 uppercase mb-3 tracking-wider">Face Range (Distance)</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <div className="flex justify-between text-xs mb-1">
+                                            <span>Start: {config.faceMin}px</span>
+                                            <span className="text-slate-500">Far</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="20" max="100" value={config.faceMin} 
+                                            onChange={(e) => setConfig({...config, faceMin: parseInt(e.target.value)})}
+                                            className="w-full accent-purple-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between text-xs mb-1">
+                                            <span>End: {config.faceMax}px</span>
+                                            <span className="text-slate-500">Close</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="100" max="300" value={config.faceMax} 
+                                            onChange={(e) => setConfig({...config, faceMax: parseInt(e.target.value)})}
+                                            className="w-full accent-purple-500"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
 
             return (
                 <div 
@@ -374,48 +447,42 @@
                     onTouchMove={mode === 'touch' ? handleTouchMove : null}
                     onClick={() => { if(isFullscreen) setShowControls(!showControls); }}
                 >
+                    {/* Settings Modal */}
+                    {showSettings && <SettingsModal />}
+
                     {/* Header */}
                     {!isFullscreen && (
-                        <div className="flex-none bg-slate-900 border-b border-slate-800 p-2 sm:p-3 flex items-center justify-between z-10 transition-all">
+                        <div className="flex-none bg-slate-900 border-b border-slate-800 p-2 sm:p-3 flex items-center justify-between z-10">
                             <div className="flex items-center gap-2">
                                 <Layers className="text-blue-400 w-5 h-5 hidden sm:block" />
                                 <h1 className="font-bold text-sm sm:text-base hidden md:block">SliceView</h1>
                             </div>
 
                             <div className="flex flex-1 items-center gap-2 bg-slate-800 rounded-lg p-1 mx-2 justify-center max-w-md">
-                                <button 
-                                    onClick={() => setMode('tilt')} 
-                                    className={`flex-1 py-2 rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-all ${mode === 'tilt' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-700'}`}
-                                >
+                                <button onClick={() => setMode('tilt')} className={`flex-1 py-2 rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-all ${mode === 'tilt' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-700'}`}>
                                     <Rotate3D className="w-4 h-4" /> <span className="hidden sm:inline">Tilt</span>
                                 </button>
-                                <button 
-                                    onClick={() => setMode('face')} 
-                                    className={`flex-1 py-2 rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-all ${mode === 'face' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-700'}`}
-                                >
+                                <button onClick={() => setMode('face')} className={`flex-1 py-2 rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-all ${mode === 'face' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-700'}`}>
                                     <User className="w-4 h-4" /> <span className="hidden sm:inline">Face</span>
                                 </button>
-                                <button 
-                                    onClick={() => setMode('touch')} 
-                                    className={`flex-1 py-2 rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-all ${mode === 'touch' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-700'}`}
-                                >
+                                <button onClick={() => setMode('touch')} className={`flex-1 py-2 rounded-md text-sm font-medium flex items-center justify-center gap-2 transition-all ${mode === 'touch' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-700'}`}>
                                     <MousePointer2 className="w-4 h-4" /> <span className="hidden sm:inline">Touch</span>
                                 </button>
                             </div>
 
                             <div className="flex items-center gap-2">
                                 <button 
-                                    onClick={() => setReverse(!reverse)}
-                                    className={`p-2 rounded-lg transition-colors ${reverse ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
-                                    title="Reverse Direction"
+                                    onClick={() => setShowSettings(true)}
+                                    className="p-2 rounded-lg bg-slate-800 text-slate-400 hover:bg-slate-700 transition-colors"
+                                    title="Settings"
                                 >
-                                    <ArrowUpDown className="w-4 h-4" />
+                                    <Settings className="w-4 h-4" />
                                 </button>
-                                <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors" title="Upload Media">
+                                <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors">
                                     <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
                                     <Upload className="w-4 h-4" />
                                 </label>
-                                <button onClick={toggleFullscreen} className="bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors" title="Fullscreen">
+                                <button onClick={toggleFullscreen} className="bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors">
                                     <Maximize className="w-4 h-4" />
                                 </button>
                             </div>
@@ -426,7 +493,7 @@
                     <div className="flex-1 relative overflow-hidden flex flex-col justify-center items-center">
                         
                         {isFullscreen && showControls && (
-                            <div className="absolute top-4 right-4 z-50 animate-fade-in">
+                            <div className="absolute top-4 right-4 z-40 animate-fade-in">
                                 <button onClick={(e) => { e.stopPropagation(); setIsFullscreen(false); }} className="bg-black/80 text-white px-4 py-2 rounded-full flex items-center gap-2 border border-slate-700">
                                     <Minimize className="w-4 h-4" /> Exit
                                 </button>
@@ -436,13 +503,13 @@
                         <video ref={webcamRef} className="hidden" playsInline muted autoPlay width="320" height="240" />
 
                         {/* MODE PERMISSIONS */}
-                        {mode === 'tilt' && !permissionGranted && !isFullscreen && (
+                        {mode === 'tilt' && !permissionGranted && !isFullscreen && !showSettings && (
                             <div className="absolute inset-0 z-30 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
                                 <Rotate3D className="w-12 h-12 text-blue-500 mb-4" />
                                 <button onClick={requestSensorAccess} className="bg-blue-600 px-6 py-2 rounded-full font-bold">Enable Sensors</button>
                             </div>
                         )}
-                        {mode === 'face' && !cameraActive && (
+                        {mode === 'face' && !cameraActive && !showSettings && (
                             <div className="absolute inset-0 z-30 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
                                 <User className="w-12 h-12 text-blue-500 mb-4" />
                                 <button onClick={enableCamera} className="bg-blue-600 px-6 py-2 rounded-full font-bold">Start Camera</button>
@@ -478,11 +545,11 @@
                         )}
 
                         {/* INFO OVERLAY */}
-                        {!isFullscreen && (
+                        {!isFullscreen && !showSettings && (
                             <div className="absolute bottom-6 bg-slate-900/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700 text-xs font-mono text-slate-300 flex gap-4 pointer-events-none">
                                 <span>{mode.toUpperCase()}</span>
                                 <span>{debugInfo.label}: {debugInfo.val}</span>
-                                <span className={reverse ? "text-amber-500" : ""}>{reverse ? "REV" : "FWD"}</span>
+                                <span className={config.reverse ? "text-amber-500" : ""}>{config.reverse ? "REV" : "FWD"}</span>
                             </div>
                         )}
                     </div>
