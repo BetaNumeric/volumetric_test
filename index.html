@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.6_SliceView_Fullscreen</title>
+    <title>v0.7_SliceView_Rev_CamFix</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -38,7 +38,7 @@
         /* Global scroll prevention for app-like feel */
         body, html {
             overscroll-behavior: none;
-            touch-action: none; /* Disables browser handling of gestures/scrolling */
+            touch-action: none;
             height: 100%;
             width: 100%;
             overflow: hidden;
@@ -64,7 +64,7 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Smartphone, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play, User, MousePointer2, Maximize, Minimize } from 'lucide-react';
+        import { Upload, Smartphone, Rotate3D, Layers, AlertTriangle, FileVideo, Clock, Play, User, MousePointer2, Maximize, Minimize, ArrowUpDown } from 'lucide-react';
 
         const App = () => {
             // --- State ---
@@ -79,36 +79,40 @@
             const [errorMessage, setErrorMessage] = useState('');
             const [debugInfo, setDebugInfo] = useState({ val: 0, label: '-' });
             
+            // Reverse State
+            const [reverse, setReverse] = useState(false);
+            
             // Fullscreen State
             const [isFullscreen, setIsFullscreen] = useState(false);
             const [showControls, setShowControls] = useState(false);
             
             // Refs
             const positionRef = useRef(0.5); 
+            const reverseRef = useRef(false); // Ref for sync inside loops
+            const modeRef = useRef('tilt'); // Ref for sync inside loops
+            
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
             const webcamRef = useRef(null);
             const faceModelRef = useRef(null);
-            const requestRef = useRef(null);
+
+            // Sync refs with state
+            useEffect(() => { reverseRef.current = reverse; updateVideoPosition(positionRef.current); }, [reverse]);
+            useEffect(() => { modeRef.current = mode; }, [mode]);
 
             // --- 1. SENSOR PERMISSIONS (Tilt) ---
             const requestSensorAccess = async () => {
                 setErrorMessage('');
-                // HTTPS Check
                 if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-                    setErrorMessage("iOS requires HTTPS. App may not work.");
+                    setErrorMessage("iOS requires HTTPS.");
                 }
-                // iOS Permission
                 if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
                     try {
                         const response = await DeviceOrientationEvent.requestPermission();
-                        if (response === 'granted') {
-                            setPermissionGranted(true);
-                        } else {
-                            setErrorMessage("Sensor permission denied.");
-                        }
+                        if (response === 'granted') setPermissionGranted(true);
+                        else setErrorMessage("Permission denied.");
                     } catch (e) {
-                        setErrorMessage("Error requesting sensor permission.");
+                        setErrorMessage("Error requesting permission.");
                     }
                 } else {
                     setPermissionGranted(true);
@@ -116,12 +120,30 @@
             };
 
             // --- 2. CAMERA SETUP (Face Mode) ---
+            const stopCamera = () => {
+                if (webcamRef.current && webcamRef.current.srcObject) {
+                    const tracks = webcamRef.current.srcObject.getTracks();
+                    tracks.forEach(track => track.stop());
+                    webcamRef.current.srcObject = null;
+                }
+                setCameraActive(false);
+            };
+
+            // Handle Mode Switching Cleanup
+            useEffect(() => {
+                if (mode !== 'face') {
+                    stopCamera();
+                }
+            }, [mode]);
+
             const enableCamera = async () => {
                 if (cameraActive) return;
                 try {
                     setStatus("Loading AI Model...");
-                    const model = await blazeface.load();
-                    faceModelRef.current = model;
+                    if (!faceModelRef.current) {
+                        const model = await blazeface.load();
+                        faceModelRef.current = model;
+                    }
                     
                     setStatus("Accessing Camera...");
                     const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -130,7 +152,6 @@
                     
                     if (webcamRef.current) {
                         webcamRef.current.srcObject = stream;
-                        // Wait for video to be ready
                         await new Promise((resolve) => {
                             webcamRef.current.onloadedmetadata = () => {
                                 webcamRef.current.play();
@@ -143,52 +164,46 @@
                     }
                 } catch (err) {
                     console.error(err);
-                    setErrorMessage("Camera access denied or failed.");
+                    setErrorMessage("Camera access failed.");
                     setStatus("Camera Error");
                 }
             };
 
             const startFaceLoop = () => {
                 const loop = async () => {
-                    if (mode === 'face' && faceModelRef.current && webcamRef.current) {
-                        const returnTensors = false;
-                        const predictions = await faceModelRef.current.estimateFaces(webcamRef.current, returnTensors);
+                    // Check modeRef instead of mode state to prevent stale closure issues
+                    if (modeRef.current === 'face' && faceModelRef.current && webcamRef.current && webcamRef.current.readyState === 4) {
+                        try {
+                            const returnTensors = false;
+                            const predictions = await faceModelRef.current.estimateFaces(webcamRef.current, returnTensors);
 
-                        if (predictions.length > 0) {
-                            // Calculate face width (distance proxy)
-                            const start = predictions[0].topLeft;
-                            const end = predictions[0].bottomRight;
-                            const width = end[0] - start[0]; // Width in pixels
-                            
-                            // Heuristic: Face width usually 60px (far) to 200px (close)
-                            // We reverse it: Closer (Big Width) = Deeper Slice (1.0)
-                            // Farther (Small Width) = Early Slice (0.0)
-                            const minWidth = 60;
-                            const maxWidth = 180;
-                            let norm = (width - minWidth) / (maxWidth - minWidth);
-                            norm = Math.max(0, Math.min(1, norm));
+                            if (predictions.length > 0) {
+                                const start = predictions[0].topLeft;
+                                const end = predictions[0].bottomRight;
+                                const width = end[0] - start[0]; 
+                                
+                                // Heuristic: Face width 60px (far) to 180px (close)
+                                const minWidth = 60;
+                                const maxWidth = 180;
+                                let norm = (width - minWidth) / (maxWidth - minWidth);
+                                norm = Math.max(0, Math.min(1, norm));
 
-                            // Smooth interpolation
-                            positionRef.current += (norm - positionRef.current) * 0.1;
-                            setSliceIndex(positionRef.current);
-                            setDebugInfo({ val: Math.floor(width), label: 'Face Width' });
-                            updateVideoPosition(positionRef.current);
-                        }
+                                // Smooth interpolation
+                                positionRef.current += (norm - positionRef.current) * 0.1;
+                                setSliceIndex(positionRef.current);
+                                setDebugInfo({ val: Math.floor(width), label: 'Face Width' });
+                                updateVideoPosition(positionRef.current);
+                            }
+                        } catch(e) { /* ignore frame errors */ }
                     }
-                    if (mode === 'face') requestAnimationFrame(loop);
+                    
+                    // Keep looping if we are still in face mode
+                    if (modeRef.current === 'face') {
+                        requestAnimationFrame(loop);
+                    }
                 };
                 loop();
             };
-
-            useEffect(() => {
-                if (mode === 'face' && !cameraActive) {
-                    // Prompt user to enable camera via button, don't auto-start to avoid permission block
-                }
-                if (mode === 'face' && cameraActive) {
-                    startFaceLoop();
-                }
-            }, [mode, cameraActive]);
-
 
             // --- 3. VIDEO RENDERER ---
             const initializeVideo = () => {
@@ -196,15 +211,16 @@
                     videoRef.current.play().then(() => {
                         videoRef.current.pause();
                         setVideoMeta(prev => ({ ...prev, readyToPlay: true }));
-                    }).catch(e => {
-                        setErrorMessage("Tap again to init video.");
-                    });
+                    }).catch(e => setErrorMessage("Tap again to init video."));
                 }
             };
 
             const updateVideoPosition = (normalizedPosition) => {
                 if (videoRef.current && videoMeta.loaded && videoMeta.readyToPlay && videoMeta.duration > 0) {
-                     const targetTime = normalizedPosition * videoMeta.duration;
+                     // Apply Reverse Logic here for video seeking
+                     const effectivePos = reverseRef.current ? (1 - normalizedPosition) : normalizedPosition;
+                     
+                     const targetTime = effectivePos * videoMeta.duration;
                      if (isFinite(targetTime) && !videoRef.current.seeking) {
                          if (Math.abs(videoRef.current.currentTime - targetTime) > 0.05) { 
                              videoRef.current.currentTime = targetTime;
@@ -240,7 +256,7 @@
             // --- 4. SENSOR LOGIC (Tilt) ---
             useEffect(() => {
                 const handleOrientation = (event) => {
-                    if (mode !== 'tilt') return;
+                    if (modeRef.current !== 'tilt') return;
                     let tilt = event.beta || 0;
                     const minTilt = -10;
                     const maxTilt = 70;
@@ -253,21 +269,19 @@
                     updateVideoPosition(normalized);
                 };
 
-                if (permissionGranted && mode === 'tilt') {
+                if (permissionGranted) {
                     window.addEventListener('deviceorientation', handleOrientation);
                 }
                 return () => window.removeEventListener('deviceorientation', handleOrientation);
-            }, [permissionGranted, mode, videoMeta.loaded, videoMeta.readyToPlay]);
+            }, [permissionGranted, videoMeta.loaded, videoMeta.readyToPlay]);
 
             // --- 5. TOUCH LOGIC ---
             const handleTouchMove = (e) => {
                 if (mode !== 'touch') return;
-                // Prevent scrolling/pull-to-refresh
                 if(e.cancelable) e.preventDefault();
                 
                 const clientY = e.touches ? e.touches[0].clientY : e.clientY;
                 const height = window.innerHeight;
-                // Map top of screen to 0, bottom to 1
                 let normalized = clientY / height;
                 normalized = Math.max(0, Math.min(1, normalized));
                 
@@ -276,7 +290,6 @@
                 setDebugInfo({ val: (normalized*100).toFixed(0), label: 'Touch %' });
                 updateVideoPosition(normalized);
             };
-
 
             // --- FILE HANDLING ---
             const handleFileUpload = (e) => {
@@ -311,8 +324,18 @@
 
             const toggleFullscreen = () => {
                 setIsFullscreen(!isFullscreen);
-                // Reset controls visibility when entering/exiting
                 setShowControls(false);
+            };
+
+            // --- RENDER HELPERS ---
+            
+            // Calculate effective index for Images based on Reverse state
+            const getEffectiveImageIndex = () => {
+                if (images.length === 0) return 0;
+                const rawIdx = Math.floor(sliceIndex * (images.length - 1));
+                const clamped = Math.max(0, Math.min(rawIdx, images.length - 1));
+                
+                return reverse ? (images.length - 1 - clamped) : clamped;
             };
 
             return (
@@ -322,142 +345,114 @@
                     onTouchMove={mode === 'touch' ? handleTouchMove : null}
                     onClick={() => { if(isFullscreen) setShowControls(!showControls); }}
                 >
-                    {/* Header - Hidden in Fullscreen */}
+                    {/* Header */}
                     {!isFullscreen && (
-                        <div className="flex-none bg-slate-900 border-b border-slate-800 p-3 flex items-center justify-between z-10 transition-all">
+                        <div className="flex-none bg-slate-900 border-b border-slate-800 p-2 sm:p-3 flex items-center justify-between z-10 transition-all">
                             <div className="flex items-center gap-2">
-                                <Layers className="text-blue-400 w-5 h-5" />
-                                <h1 className="font-bold hidden sm:block">SliceViewer</h1>
+                                <Layers className="text-blue-400 w-5 h-5 hidden sm:block" />
+                                <h1 className="font-bold text-sm sm:text-base">SliceView</h1>
                             </div>
 
-                            <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1">
-                                <button 
-                                    onClick={() => setMode('tilt')}
-                                    className={`px-2 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1 ${mode === 'tilt' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
-                                >
-                                    <Rotate3D className="w-3 h-3" /> Tilt
+                            <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 mx-2">
+                                <button onClick={() => setMode('tilt')} className={`px-2 py-1.5 rounded-md text-xs font-medium ${mode === 'tilt' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}>
+                                    <Rotate3D className="w-3 h-3" />
                                 </button>
-                                <button 
-                                    onClick={() => setMode('face')}
-                                    className={`px-2 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1 ${mode === 'face' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
-                                >
-                                    <User className="w-3 h-3" /> Face
+                                <button onClick={() => setMode('face')} className={`px-2 py-1.5 rounded-md text-xs font-medium ${mode === 'face' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}>
+                                    <User className="w-3 h-3" />
                                 </button>
-                                <button 
-                                    onClick={() => setMode('touch')}
-                                    className={`px-2 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1 ${mode === 'touch' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
-                                >
-                                    <MousePointer2 className="w-3 h-3" /> Touch
+                                <button onClick={() => setMode('touch')} className={`px-2 py-1.5 rounded-md text-xs font-medium ${mode === 'touch' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}>
+                                    <MousePointer2 className="w-3 h-3" />
                                 </button>
                             </div>
 
                             <div className="flex items-center gap-2">
+                                <button 
+                                    onClick={() => setReverse(!reverse)}
+                                    className={`p-2 rounded-lg ${reverse ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                                >
+                                    <ArrowUpDown className="w-4 h-4" />
+                                </button>
                                 <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg">
                                     <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
                                     <Upload className="w-4 h-4" />
                                 </label>
-                                <button 
-                                    onClick={toggleFullscreen}
-                                    className="bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg"
-                                >
+                                <button onClick={toggleFullscreen} className="bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg">
                                     <Maximize className="w-4 h-4" />
                                 </button>
                             </div>
                         </div>
                     )}
 
-                    {/* Main Viewport */}
+                    {/* Viewport */}
                     <div className="flex-1 relative overflow-hidden flex flex-col justify-center items-center">
                         
-                        {/* Fullscreen Exit Overlay */}
                         {isFullscreen && showControls && (
                             <div className="absolute top-4 right-4 z-50 animate-fade-in">
-                                <button 
-                                    onClick={(e) => { e.stopPropagation(); setIsFullscreen(false); }}
-                                    className="bg-black/80 hover:bg-black text-white px-4 py-2 rounded-full flex items-center gap-2 border border-slate-700 backdrop-blur-md"
-                                >
-                                    <Minimize className="w-4 h-4" /> Exit Fullscreen
+                                <button onClick={(e) => { e.stopPropagation(); setIsFullscreen(false); }} className="bg-black/80 text-white px-4 py-2 rounded-full flex items-center gap-2 border border-slate-700">
+                                    <Minimize className="w-4 h-4" /> Exit
                                 </button>
                             </div>
                         )}
 
-                        {/* Hidden Webcam Element */}
                         <video ref={webcamRef} className="hidden" playsInline muted autoPlay width="320" height="240" />
 
-                        {/* MODE SPECIFIC OVERLAYS */}
-                        
-                        {/* 1. TILT PERMISSION */}
+                        {/* MODE PERMISSIONS */}
                         {mode === 'tilt' && !permissionGranted && !isFullscreen && (
                             <div className="absolute inset-0 z-30 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
                                 <Rotate3D className="w-12 h-12 text-blue-500 mb-4" />
-                                <p className="mb-4">Enable sensors for Tilt Mode</p>
-                                <button onClick={requestSensorAccess} className="bg-blue-600 px-6 py-2 rounded-full font-bold">Enable</button>
+                                <button onClick={requestSensorAccess} className="bg-blue-600 px-6 py-2 rounded-full font-bold">Enable Sensors</button>
                             </div>
                         )}
-
-                        {/* 2. FACE CAMERA PERMISSION */}
                         {mode === 'face' && !cameraActive && (
                             <div className="absolute inset-0 z-30 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
                                 <User className="w-12 h-12 text-blue-500 mb-4" />
-                                <p className="mb-4 text-sm max-w-xs">Move phone closer/further from face to slice.</p>
                                 <button onClick={enableCamera} className="bg-blue-600 px-6 py-2 rounded-full font-bold">Start Camera</button>
                                 {errorMessage && <p className="text-red-400 text-xs mt-4">{errorMessage}</p>}
                             </div>
                         )}
 
-                        {/* RENDER CONTENT */}
+                        {/* CONTENT */}
                         {videoSrc ? (
                             <div className="relative w-full h-full flex items-center justify-center bg-black group">
                                 <video ref={videoRef} src={videoSrc} className="absolute opacity-0 pointer-events-none" playsInline webkit-playsinline="true" muted preload="auto" 
-                                    onLoadedMetadata={() => {
-                                        if(videoRef.current) setVideoMeta(p => ({...p, duration: videoRef.current.duration, loaded: true}));
-                                        setStatus("Video Ready");
-                                    }}
+                                    onLoadedMetadata={() => { if(videoRef.current) setVideoMeta(p => ({...p, duration: videoRef.current.duration, loaded: true})); setStatus("Video Ready"); }}
                                 />
                                 <canvas ref={canvasRef} className="max-w-full max-h-full object-contain pointer-events-none" />
-                                
-                                {/* Video Init Button */}
                                 {!videoMeta.readyToPlay && (
                                     <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-20">
-                                        <button onClick={initializeVideo} className="bg-green-600 p-4 rounded-full shadow-lg animate-pulse">
-                                            <Play className="w-8 h-8 fill-current text-white" />
-                                        </button>
+                                        <button onClick={initializeVideo} className="bg-green-600 p-4 rounded-full shadow-lg animate-pulse"><Play className="w-8 h-8 fill-current text-white" /></button>
                                     </div>
                                 )}
                             </div>
                         ) : images.length > 0 ? (
                             <div className="relative w-full h-full flex items-center justify-center bg-black">
-                                <img src={images[Math.floor(sliceIndex * (images.length - 1))]} className="max-w-full max-h-full object-contain pointer-events-none" />
+                                <img src={images[getEffectiveImageIndex()]} className="max-w-full max-h-full object-contain pointer-events-none" />
                             </div>
                         ) : (
-                            /* Demo Sphere */
                             <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900">
                                 <div className="rounded-full bg-red-500/80 shadow-[0_0_50px_rgba(239,68,68,0.5)] transition-all duration-75 ease-linear"
                                     style={{ width: `${300 * (Math.sqrt(0.25 - Math.pow(sliceIndex - 0.5, 2)) * 2 || 0)}px`, height: `${300 * (Math.sqrt(0.25 - Math.pow(sliceIndex - 0.5, 2)) * 2 || 0)}px` }}
                                 />
                                 <div className="mt-8 font-mono text-4xl text-slate-500">{(sliceIndex * 100).toFixed(0)}%</div>
-                                <button onClick={loadSampleVideo} className="mt-6 flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-full text-sm text-blue-400">
-                                    <FileVideo className="w-4 h-4" /> Load Sample
-                                </button>
+                                <button onClick={loadSampleVideo} className="mt-6 flex items-center gap-2 bg-slate-800 px-4 py-2 rounded-full text-sm text-blue-400"><FileVideo className="w-4 h-4" /> Load Sample</button>
                             </div>
                         )}
 
-                        {/* DEBUG / INFO OVERLAY - Hidden in Fullscreen */}
+                        {/* INFO OVERLAY */}
                         {!isFullscreen && (
                             <div className="absolute bottom-6 bg-slate-900/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700 text-xs font-mono text-slate-300 flex gap-4 pointer-events-none">
-                                <span>MODE: {mode.toUpperCase()}</span>
+                                <span>{mode.toUpperCase()}</span>
                                 <span>{debugInfo.label}: {debugInfo.val}</span>
-                                <span>IDX: {(sliceIndex*100).toFixed(0)}</span>
+                                <span className={reverse ? "text-amber-500" : ""}>{reverse ? "REV" : "FWD"}</span>
                             </div>
                         )}
                     </div>
 
-                    {/* Footer - Hidden in Fullscreen */}
                     {!isFullscreen && (
-                        <div className="flex-none bg-slate-900 p-2 text-center text-xs text-slate-500 transition-all">
+                        <div className="flex-none bg-slate-900 p-2 text-center text-xs text-slate-500">
                             {mode === 'tilt' && "Tip: Tilt phone forward/back."}
-                            {mode === 'face' && "Tip: Move phone closer/further from face."}
-                            {mode === 'touch' && "Tip: Drag finger up/down on screen."}
+                            {mode === 'face' && "Tip: Move phone closer/further."}
+                            {mode === 'touch' && "Tip: Drag finger up/down."}
                         </div>
                     )}
                 </div>
