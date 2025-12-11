@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v0.7_SliceView_Rev_CamFix</title>
+    <title>v0.8_SliceView_CamFixFinal</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -88,8 +88,9 @@
             
             // Refs
             const positionRef = useRef(0.5); 
-            const reverseRef = useRef(false); // Ref for sync inside loops
-            const modeRef = useRef('tilt'); // Ref for sync inside loops
+            const reverseRef = useRef(false); 
+            const modeRef = useRef('tilt'); 
+            const streamRef = useRef(null); // Direct reference to the camera stream
             
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
@@ -120,17 +121,27 @@
             };
 
             // --- 2. CAMERA SETUP (Face Mode) ---
+            
+            // Robust Stop Camera Function
             const stopCamera = () => {
-                if (webcamRef.current && webcamRef.current.srcObject) {
-                    const tracks = webcamRef.current.srcObject.getTracks();
+                // 1. Stop the specific stream we stored
+                if (streamRef.current) {
+                    const tracks = streamRef.current.getTracks();
                     tracks.forEach(track => track.stop());
+                    streamRef.current = null;
+                }
+                
+                // 2. Clear the video element source as backup
+                if (webcamRef.current) {
                     webcamRef.current.srcObject = null;
                 }
+
                 setCameraActive(false);
             };
 
             // Handle Mode Switching Cleanup
             useEffect(() => {
+                // If we leave face mode, kill the camera immediately
                 if (mode !== 'face') {
                     stopCamera();
                 }
@@ -145,11 +156,22 @@
                         faceModelRef.current = model;
                     }
                     
+                    // Check if user switched away while loading model
+                    if (modeRef.current !== 'face') return;
+
                     setStatus("Accessing Camera...");
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         video: { facingMode: 'user', width: 320, height: 240 } 
                     });
                     
+                    // Check if user switched away while requesting camera (Race Condition Fix)
+                    if (modeRef.current !== 'face') {
+                        stream.getTracks().forEach(track => track.stop());
+                        return;
+                    }
+
+                    streamRef.current = stream; // Store for cleanup
+
                     if (webcamRef.current) {
                         webcamRef.current.srcObject = stream;
                         await new Promise((resolve) => {
