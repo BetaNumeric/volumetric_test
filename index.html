@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>v1.2_SliceView_SettingsPerformance</title>
+    <title>v1.3_SliceView_DualSlider</title>
     
     <!-- PWA Manifest -->
     <link rel="manifest" href="manifest.json">
@@ -44,27 +44,48 @@
             overflow: hidden;
         }
         
-        /* Slider Styling */
-        input[type=range] {
-            @apply h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer;
-            touch-action: pan-y; /* Critical: Allows vertical scroll without triggering page actions */
-        }
-        
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            height: 24px; /* Larger touch target */
-            width: 24px;
-            border-radius: 50%;
-            background: #3b82f6;
-            cursor: pointer;
-            box-shadow: 0 0 4px rgba(0,0,0,0.5);
-            margin-top: -8px; /* Center alignment fix */
+        /* Dual Slider CSS Magic */
+        .dual-range-container {
+            position: relative;
+            height: 24px;
+            width: 100%;
         }
 
-        input[type=range]::-webkit-slider-runnable-track {
-            height: 8px;
-            border-radius: 4px;
-            background: #334155;
+        /* The transparent inputs sitting on top */
+        .dual-range-input {
+            position: absolute;
+            pointer-events: none; /* Let clicks pass through to the one below if not hitting thumb */
+            -webkit-appearance: none;
+            z-index: 10;
+            height: 24px;
+            width: 100%;
+            opacity: 0;
+            cursor: pointer;
+            touch-action: pan-y;
+        }
+
+        /* The visible thumbs */
+        .dual-range-input::-webkit-slider-thumb {
+            pointer-events: auto; /* Re-enable clicks for the thumb */
+            -webkit-appearance: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: white;
+            border: 2px solid #3b82f6;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            margin-top: 0px; 
+        }
+
+        /* Firefox support */
+        .dual-range-input::-moz-range-thumb {
+            pointer-events: auto;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: white;
+            border: 2px solid #3b82f6;
+            cursor: pointer;
         }
     </style>
 </head>
@@ -120,7 +141,7 @@
             const positionRef = useRef(0.5); 
             const configRef = useRef(config); 
             const modeRef = useRef('tilt'); 
-            const showSettingsRef = useRef(false); // Critical for pausing loops
+            const showSettingsRef = useRef(false);
             
             const streamRef = useRef(null); 
             const videoRef = useRef(null);
@@ -211,26 +232,21 @@
 
             const startFaceLoop = () => {
                 const loop = async () => {
-                    // PAUSE if settings are open
                     if (showSettingsRef.current) {
                          if (modeRef.current === 'face') requestAnimationFrame(loop);
                          return;
                     }
-
                     if (modeRef.current === 'face' && faceModelRef.current && webcamRef.current && webcamRef.current.readyState === 4) {
                         try {
                             const returnTensors = false;
                             const predictions = await faceModelRef.current.estimateFaces(webcamRef.current, returnTensors);
-
                             if (predictions.length > 0) {
                                 const start = predictions[0].topLeft;
                                 const end = predictions[0].bottomRight;
                                 const width = end[0] - start[0]; 
-                                
                                 const { faceMin, faceMax } = configRef.current;
                                 let norm = (width - faceMin) / (faceMax - faceMin);
                                 norm = Math.max(0, Math.min(1, norm));
-
                                 positionRef.current += (norm - positionRef.current) * 0.1;
                                 setSliceIndex(positionRef.current);
                                 setDebugInfo({ val: Math.floor(width), label: 'Face Width' });
@@ -268,12 +284,10 @@
             useEffect(() => {
                 let animationFrameId;
                 const renderLoop = () => {
-                    // PAUSE Rendering if settings open to save resources
                     if (showSettingsRef.current) {
                         animationFrameId = requestAnimationFrame(renderLoop);
                         return;
                     }
-
                     if (videoSrc && videoRef.current && canvasRef.current && videoMeta.loaded) {
                         const video = videoRef.current;
                         const canvas = canvasRef.current;
@@ -294,24 +308,20 @@
                 return () => cancelAnimationFrame(animationFrameId);
             }, [videoSrc, videoMeta.loaded]);
 
-
-            // --- 4. SENSOR LOGIC (Tilt) ---
+            // --- 4. SENSOR LOGIC ---
             useEffect(() => {
                 const handleOrientation = (event) => {
                     if (modeRef.current !== 'tilt') return;
-                    if (showSettingsRef.current) return; // PAUSE SENSORS
-
+                    if (showSettingsRef.current) return;
                     let tilt = event.beta || 0;
                     const { tiltMin, tiltMax } = configRef.current;
                     let normalized = (tilt - tiltMin) / (tiltMax - tiltMin);
                     normalized = Math.max(0, Math.min(1, normalized));
-                    
                     setSliceIndex(normalized);
                     positionRef.current = normalized; 
                     setDebugInfo({ val: tilt.toFixed(0), label: 'Tilt Angle' });
                     updateVideoPosition(normalized);
                 };
-
                 if (permissionGranted) {
                     window.addEventListener('deviceorientation', handleOrientation);
                 }
@@ -321,15 +331,12 @@
             // --- 5. TOUCH LOGIC ---
             const handleTouchMove = (e) => {
                 if (mode !== 'touch') return;
-                if (showSettingsRef.current) return; // BLOCK TOUCH
-
+                if (showSettingsRef.current) return;
                 if(e.cancelable) e.preventDefault();
-                
                 const clientY = e.touches ? e.touches[0].clientY : e.clientY;
                 const height = window.innerHeight;
                 let normalized = clientY / height;
                 normalized = Math.max(0, Math.min(1, normalized));
-                
                 setSliceIndex(normalized);
                 positionRef.current = normalized;
                 setDebugInfo({ val: (normalized*100).toFixed(0), label: 'Touch %' });
@@ -379,102 +386,106 @@
                 return config.reverse ? (images.length - 1 - clamped) : clamped;
             };
 
-            // --- SETTINGS COMPONENT (ISOLATED STATE) ---
-            
+            // --- CUSTOM COMPONENTS ---
+
+            // Reusable Dual Slider
+            const DualRangeSlider = ({ min, max, value, onChange, unit = "" }) => {
+                const [minVal, maxVal] = value;
+                
+                // Calculate percentages for track
+                const minPercent = ((minVal - min) / (max - min)) * 100;
+                const maxPercent = ((maxVal - min) / (max - min)) * 100;
+
+                const handleMin = (e) => {
+                    const v = Math.min(Number(e.target.value), maxVal - 1);
+                    onChange([v, maxVal]);
+                };
+
+                const handleMax = (e) => {
+                    const v = Math.max(Number(e.target.value), minVal + 1);
+                    onChange([minVal, v]);
+                };
+
+                return (
+                    <div className="w-full pt-6 pb-2">
+                        <div className="flex justify-between text-xs text-slate-400 mb-2 font-mono">
+                            <span>{minVal}{unit}</span>
+                            <span>{maxVal}{unit}</span>
+                        </div>
+                        <div className="dual-range-container">
+                            {/* Track Background */}
+                            <div className="absolute top-1/2 left-0 w-full h-2 bg-slate-700 rounded-full -translate-y-1/2 overflow-hidden">
+                                {/* Active Range Blue Bar */}
+                                <div 
+                                    className="absolute top-0 h-full bg-blue-600 rounded-full"
+                                    style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }}
+                                />
+                            </div>
+
+                            {/* Range Inputs */}
+                            <input 
+                                type="range" min={min} max={max} value={minVal} onChange={handleMin}
+                                className="dual-range-input"
+                            />
+                            <input 
+                                type="range" min={min} max={max} value={maxVal} onChange={handleMax}
+                                className="dual-range-input"
+                            />
+                        </div>
+                    </div>
+                );
+            };
+
             const SettingsModal = ({ initialConfig, onSave, onClose }) => {
-                // Use local state so dragging doesn't trigger app re-renders
                 const [localConfig, setLocalConfig] = useState(initialConfig);
 
                 return (
-                    <div 
-                        className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-                        onClick={onClose} // Click outside to close
-                    >
-                        <div 
-                            className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl shadow-2xl p-6"
-                            onClick={(e) => e.stopPropagation()} // Prevent closing when clicking inside
-                        >
+                    <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+                        <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl shadow-2xl p-6" onClick={(e) => e.stopPropagation()}>
                             <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-xl font-bold flex items-center gap-2"><Settings className="w-5 h-5 text-blue-400" /> Settings</h2>
-                                <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white">
-                                    <X className="w-5 h-5" />
-                                </button>
+                                <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
                             </div>
 
                             <div className="space-y-6">
-                                {/* Reverse Toggle */}
+                                {/* Reverse */}
                                 <div className="flex items-center justify-between bg-slate-800/50 p-3 rounded-xl">
                                     <span className="text-sm font-medium flex items-center gap-2"><ArrowUpDown className="w-4 h-4" /> Flip Order</span>
-                                    <button 
-                                        onClick={() => setLocalConfig({...localConfig, reverse: !localConfig.reverse})}
-                                        className={`w-12 h-6 rounded-full p-1 transition-colors ${localConfig.reverse ? 'bg-blue-600' : 'bg-slate-600'}`}
-                                    >
+                                    <button onClick={() => setLocalConfig({...localConfig, reverse: !localConfig.reverse})} className={`w-12 h-6 rounded-full p-1 transition-colors ${localConfig.reverse ? 'bg-blue-600' : 'bg-slate-600'}`}>
                                         <div className={`w-4 h-4 bg-white rounded-full shadow-md transform transition-transform ${localConfig.reverse ? 'translate-x-6' : 'translate-x-0'}`} />
                                     </button>
                                 </div>
 
-                                {/* Tilt Calibration */}
+                                {/* Dual Sliders */}
                                 <div>
-                                    <h3 className="text-xs font-semibold text-slate-400 uppercase mb-3 tracking-wider">Tilt Range (Angles)</h3>
-                                    <div className="space-y-4">
-                                        <div>
-                                            <div className="flex justify-between text-xs mb-1">
-                                                <span>Start: {localConfig.tiltMin}°</span>
-                                                <span className="text-slate-500">Back</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="-45" max="45" value={localConfig.tiltMin} 
-                                                onChange={(e) => setLocalConfig({...localConfig, tiltMin: parseInt(e.target.value)})}
-                                                className="w-full"
-                                            />
-                                        </div>
-                                        <div>
-                                            <div className="flex justify-between text-xs mb-1">
-                                                <span>End: {localConfig.tiltMax}°</span>
-                                                <span className="text-slate-500">Forward</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="45" max="135" value={localConfig.tiltMax} 
-                                                onChange={(e) => setLocalConfig({...localConfig, tiltMax: parseInt(e.target.value)})}
-                                                className="w-full"
-                                            />
-                                        </div>
+                                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Tilt Range (Angle)</h3>
+                                    <DualRangeSlider 
+                                        min={-45} max={135} 
+                                        value={[localConfig.tiltMin, localConfig.tiltMax]}
+                                        onChange={([min, max]) => setLocalConfig({...localConfig, tiltMin: min, tiltMax: max})}
+                                        unit="°"
+                                    />
+                                    <div className="flex justify-between text-[10px] text-slate-600 mt-1">
+                                        <span>Back (-45°)</span>
+                                        <span>Forward (135°)</span>
                                     </div>
                                 </div>
 
-                                {/* Face Calibration */}
                                 <div>
-                                    <h3 className="text-xs font-semibold text-slate-400 uppercase mb-3 tracking-wider">Face Range (Distance)</h3>
-                                    <div className="space-y-4">
-                                        <div>
-                                            <div className="flex justify-between text-xs mb-1">
-                                                <span>Start: {localConfig.faceMin}px</span>
-                                                <span className="text-slate-500">Far</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="20" max="100" value={localConfig.faceMin} 
-                                                onChange={(e) => setLocalConfig({...localConfig, faceMin: parseInt(e.target.value)})}
-                                                className="w-full accent-purple-500"
-                                            />
-                                        </div>
-                                        <div>
-                                            <div className="flex justify-between text-xs mb-1">
-                                                <span>End: {localConfig.faceMax}px</span>
-                                                <span className="text-slate-500">Close</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="100" max="300" value={localConfig.faceMax} 
-                                                onChange={(e) => setLocalConfig({...localConfig, faceMax: parseInt(e.target.value)})}
-                                                className="w-full accent-purple-500"
-                                            />
-                                        </div>
+                                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Face Range (Distance)</h3>
+                                    <DualRangeSlider 
+                                        min={20} max={300} 
+                                        value={[localConfig.faceMin, localConfig.faceMax]}
+                                        onChange={([min, max]) => setLocalConfig({...localConfig, faceMin: min, faceMax: max})}
+                                        unit="px"
+                                    />
+                                    <div className="flex justify-between text-[10px] text-slate-600 mt-1">
+                                        <span>Far (20px)</span>
+                                        <span>Close (300px)</span>
                                     </div>
                                 </div>
 
-                                <button 
-                                    onClick={() => onSave(localConfig)}
-                                    className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2"
-                                >
+                                <button onClick={() => onSave(localConfig)} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2">
                                     <Check className="w-5 h-5" /> Save & Close
                                 </button>
                             </div>
@@ -495,10 +506,7 @@
                         <SettingsModal 
                             initialConfig={config} 
                             onClose={() => setShowSettings(false)}
-                            onSave={(newConfig) => {
-                                setConfig(newConfig);
-                                setShowSettings(false);
-                            }}
+                            onSave={(newConfig) => { setConfig(newConfig); setShowSettings(false); }}
                         />
                     )}
 
@@ -523,38 +531,25 @@
                             </div>
 
                             <div className="flex items-center gap-2">
-                                <button 
-                                    onClick={() => setShowSettings(true)}
-                                    className="p-2 rounded-lg bg-slate-800 text-slate-400 hover:bg-slate-700 transition-colors"
-                                    title="Settings"
-                                >
-                                    <Settings className="w-4 h-4" />
-                                </button>
+                                <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg bg-slate-800 text-slate-400 hover:bg-slate-700 transition-colors" title="Settings"><Settings className="w-4 h-4" /></button>
                                 <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors">
                                     <input type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileUpload} />
                                     <Upload className="w-4 h-4" />
                                 </label>
-                                <button onClick={toggleFullscreen} className="bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors">
-                                    <Maximize className="w-4 h-4" />
-                                </button>
+                                <button onClick={toggleFullscreen} className="bg-slate-800 hover:bg-slate-700 text-white px-2 py-2 rounded-lg transition-colors"><Maximize className="w-4 h-4" /></button>
                             </div>
                         </div>
                     )}
 
                     {/* Viewport */}
                     <div className="flex-1 relative overflow-hidden flex flex-col justify-center items-center">
-                        
                         {isFullscreen && showControls && (
                             <div className="absolute top-4 right-4 z-40 animate-fade-in">
-                                <button onClick={(e) => { e.stopPropagation(); setIsFullscreen(false); }} className="bg-black/80 text-white px-4 py-2 rounded-full flex items-center gap-2 border border-slate-700">
-                                    <Minimize className="w-4 h-4" /> Exit
-                                </button>
+                                <button onClick={(e) => { e.stopPropagation(); setIsFullscreen(false); }} className="bg-black/80 text-white px-4 py-2 rounded-full flex items-center gap-2 border border-slate-700"><Minimize className="w-4 h-4" /> Exit</button>
                             </div>
                         )}
-
                         <video ref={webcamRef} className="hidden" playsInline muted autoPlay width="320" height="240" />
 
-                        {/* MODE PERMISSIONS */}
                         {mode === 'tilt' && !permissionGranted && !isFullscreen && !showSettings && (
                             <div className="absolute inset-0 z-30 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
                                 <Rotate3D className="w-12 h-12 text-blue-500 mb-4" />
@@ -569,7 +564,6 @@
                             </div>
                         )}
 
-                        {/* CONTENT */}
                         {videoSrc ? (
                             <div className="relative w-full h-full flex items-center justify-center bg-black group">
                                 <video ref={videoRef} src={videoSrc} className="absolute opacity-0 pointer-events-none" playsInline webkit-playsinline="true" muted preload="auto" 
@@ -596,7 +590,6 @@
                             </div>
                         )}
 
-                        {/* INFO OVERLAY */}
                         {!isFullscreen && !showSettings && (
                             <div className="absolute bottom-6 bg-slate-900/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700 text-xs font-mono text-slate-300 flex gap-4 pointer-events-none">
                                 <span>{mode.toUpperCase()}</span>
